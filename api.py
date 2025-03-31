@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
 import uvicorn
 from model import *
@@ -41,6 +41,12 @@ class MemoryResponse(BaseModel):
     memories: List[str]
     query: Optional[str] = None
     memory_type: str
+
+class LLMConfigUpdate(BaseModel):
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(None, gt=0)
+    model: Optional[str] = None
+    system_message: Optional[str] = None
 
 def run_simulation_loop():
     global simulation, simulation_running, simulation_results, stop_event
@@ -182,6 +188,43 @@ async def query_memory(query_params: MemoryQuery):
         query=query_params.query,
         memory_type=query_params.memory_type
     )
+
+@app.post("/emotion/adjust")
+async def adjust_emotion(
+    emotion_name: str, 
+    change: float = Query(..., ge=-1.0, le=1.0)
+):
+    global agent
+    
+    if not agent:
+        raise HTTPException(status_code=400, detail="Simulation has not been started")
+    
+    if emotion_name not in agent.mind.emotion_center.emotions:
+        raise HTTPException(status_code=400, detail=f"Unknown emotion: {emotion_name}")
+    
+    emotion = agent.mind.emotion_center.emotions[emotion_name]
+    emotion.intensity += change
+    emotion.intensity = max(0, min(1, emotion.intensity))
+    
+    return {
+        "emotion": emotion_name,
+        "previous_intensity": emotion.intensity - change,
+        "new_intensity": emotion.intensity,
+        "change": change
+    }
+
+@app.post("/config/llm")
+async def update_llm_configuration(config_update: LLMConfigUpdate):
+    from model import update_llm_config, LLM_CONFIG
+    
+    # Filter out None values
+    updates = {k: v for k, v in config_update.dict().items() if v is not None}
+    
+    if not updates:
+        return {"message": "No updates provided", "current_config": LLM_CONFIG}
+    
+    update_llm_config(updates)
+    return {"message": "Configuration updated", "current_config": LLM_CONFIG}
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="0.0.0.0", port=8081, reload=True) 
