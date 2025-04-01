@@ -28,6 +28,9 @@ If you've sent a message and the user has just now responded, it'll appear here:
 USER RESPONSE:
 {user_response}
 
+STATS:
+{generation_stats}
+
 TOOLS:
 Available tools:
 {available_tools}
@@ -75,6 +78,9 @@ RECENT USER CONVERSATIONS:
 If the user has a message or response to you, it'll appear here:
 USER RESPONSE:
 {user_response}
+
+STATS:
+{generation_stats}
 
 LAST TOOL RESULTS:
 {result}

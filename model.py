@@ -986,8 +986,15 @@ class LLMInterface:
         self.tool_registry = ToolRegistry()
         self.tool_registry.llm_client = self  # Give the registry access to the LLM
         
-        # Register default tools
-        self._register_default_tools()
+        # Add generation counter and thinking time tracking
+        self.generation_counter = 0
+        self.total_thinking_time = 0.0
+        
+        # Register default tools from the tool registry first
+        self.tool_registry.register_default_tools()
+        
+        # Then register any LLM-specific tools
+        self._register_agent_specific_tools()
         
     def initialize_client(self):
         try:
@@ -1009,6 +1016,9 @@ class LLMInterface:
                 if not self.client:
                     logger.error("Failed to initialize OpenAI client")
                     return "Error: Could not connect to LLM API"
+            
+            # Increment the generation counter
+            self.generation_counter += 1
             
             # Prepare the messages
             messages = [
@@ -1037,7 +1047,8 @@ class LLMInterface:
                 metadata={
                     "system_message": system_message,
                     "prompt_length": len(prompt),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "generation_number": self.generation_counter
                 }
             )
             
@@ -1053,7 +1064,9 @@ class LLMInterface:
             )
             
             elapsed = time.time() - start_time
-            logger.info(f"LLM API response received in {elapsed:.2f}s")
+            # Update total thinking time
+            self.total_thinking_time += elapsed
+            logger.info(f"LLM API response received in {elapsed:.2f}s. Total thinking time: {self.total_thinking_time:.2f}s")
             
             # Extract the response text
             response_text = response.choices[0].message.content
@@ -1065,10 +1078,16 @@ class LLMInterface:
                 metadata={
                     "elapsed_time": elapsed,
                     "output_length": len(response_text),
-                    "finish_reason": response.choices[0].finish_reason if hasattr(response.choices[0], 'finish_reason') else None
+                    "finish_reason": response.choices[0].finish_reason if hasattr(response.choices[0], 'finish_reason') else None,
+                    "total_thinking_time": self.total_thinking_time,
+                    "generation_number": self.generation_counter
                 }
             )
             
+            # Save the state to persist thinking time and generation count
+            if self.tool_registry:
+                self.tool_registry.save_state()
+                
             return response_text
             
         except Exception as e:
@@ -1092,7 +1111,9 @@ class LLMInterface:
             metadata={
                 "timestamp": datetime.now().isoformat(),
                 "emotional_state": json.dumps(context.get("emotional_state", {})),
-                "has_stimuli": bool(context.get("stimuli"))
+                "has_stimuli": bool(context.get("stimuli")),
+                "generation_counter": self.generation_counter,
+                "total_thinking_time": self.total_thinking_time
             }
         )
 
@@ -1191,11 +1212,14 @@ class LLMInterface:
                 logger.info("No long-term goal found")
             
             # Get recent user conversations and latest response
-            recent_user_conversations = "\n\n".join(self._read_user_conversations(5))
+            recent_user_conversations = "\n\n".join(self.tool_registry.read_user_conversations(5))
             if not recent_user_conversations:
                 recent_user_conversations = "No recent conversations with the user."
             
-            user_response = self._get_latest_user_response()
+            user_response = self.tool_registry.get_latest_user_response()
+            
+            # Add generation statistics
+            generation_stats = f"You've thought {self.generation_counter} times for {self.total_thinking_time:.2f}s"
             
             # Initialize the response and tool results
             current_response = ""
@@ -1232,7 +1256,8 @@ class LLMInterface:
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
                         recent_user_conversations=recent_user_conversations,
-                        user_response=user_response
+                        user_response=user_response,
+                        generation_stats=generation_stats
                     )
                 else:
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
@@ -1247,7 +1272,8 @@ class LLMInterface:
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
                         recent_user_conversations=recent_user_conversations,
-                        user_response=user_response
+                        user_response=user_response,
+                        generation_stats=generation_stats
                     )
                 
                 # Generate the response
@@ -1318,7 +1344,9 @@ class LLMInterface:
                     "tool_calls_count": len(all_tool_calls),
                     "tools_used": [t["name"] for t in all_tool_calls],
                     "thought_length": len(current_response),
-                    "iterations": iteration_count
+                    "iterations": iteration_count,
+                    "generation_counter": self.generation_counter,
+                    "total_thinking_time": self.total_thinking_time
                 }
             )
             
@@ -1336,49 +1364,9 @@ class LLMInterface:
             
             return f"Error generating thought: {str(e)}"
 
-    def _register_default_tools(self):
-        """Register default tools that are always available"""
-        # Tool to get current time
-        self.tool_registry.register_tool(Tool(
-            name="get_current_time",
-            description="Get the current date and time",
-            function=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            usage_example="[TOOL: get_current_time()]"
-        ))
-        
-        # Tool to search web (simulated)
-        self.tool_registry.register_tool(Tool(
-            name="search_web",
-            description="Search the web for information (simulated)",
-            function=lambda query=None, search=None: self._simulate_web_search(query or search),
-            usage_example="[TOOL: search_web(query:latest AI developments)]"
-        ))
-        
-        # Tool to message the user
-        self.tool_registry.register_tool(Tool(
-            name="message_user",
-            description="Send a message to the user",
-            function=lambda message=None, text=None: self._message_user(message or text),
-            usage_example="[TOOL: message_user(message:I've found something interesting)]"
-        ))
-        
-        # Tool to list available tools
-        self.tool_registry.register_tool(Tool(
-            name="list_tools",
-            description="List all available tools provided by the system",
-            function=lambda: self.tool_registry.list_tools(),
-            usage_example="[TOOL: list_tools()]"
-        ))
-        
-        # Tool to list enhanced/simulated tools
-        self.tool_registry.register_tool(Tool(
-            name="list_tools_enhanced",
-            description="List available tools plus additional simulated capabilities",
-            function=lambda: self._list_tools_enhanced(),
-            usage_example="[TOOL: list_tools_enhanced()]"
-        ))
-        
-        # Tool to set focus
+    def _register_agent_specific_tools(self):
+        """Register tools specific to this agent"""
+        # Tool to set focus - LLM specific since it affects LLM context
         self.tool_registry.register_tool(Tool(
             name="set_focus",
             description="Set the current focus of attention",
@@ -1386,7 +1374,7 @@ class LLMInterface:
             usage_example="[TOOL: set_focus(data analysis)]"
         ))
         
-        # Tool for system instructions
+        # Tool for system instructions - LLM specific since it affects LLM context
         self.tool_registry.register_tool(Tool(
             name="system_instruction",
             description="Add a system instruction to be followed during thinking",
@@ -1394,33 +1382,12 @@ class LLMInterface:
             usage_example="[TOOL: system_instruction(Think more creatively)]"
         ))
         
-        # Goal management tools
+        # Tool to get generation stats
         self.tool_registry.register_tool(Tool(
-            name="add_short_term_goal",
-            description="Add a short-term goal (max 3 goals, oldest is removed if full)",
-            function=lambda goal: self._add_short_term_goal(goal),
-            usage_example="[TOOL: add_short_term_goal(goal:Complete the project documentation)]"
-        ))
-        
-        self.tool_registry.register_tool(Tool(
-            name="set_long_term_goal",
-            description="Set a long-term goal (can only be changed once per hour)",
-            function=lambda goal: self.tool_registry.goal_manager.set_long_term_goal(goal),
-            usage_example="[TOOL: set_long_term_goal(goal:Become proficient in machine learning)]"
-        ))
-        
-        self.tool_registry.register_tool(Tool(
-            name="remove_short_term_goal",
-            description="Remove a short-term goal by its index (0-2)",
-            function=lambda index: self.tool_registry.goal_manager.remove_short_term_goal(index),
-            usage_example="[TOOL: remove_short_term_goal(index:0)]"
-        ))
-        
-        self.tool_registry.register_tool(Tool(
-            name="get_goals",
-            description="Get current short-term and long-term goals",
-            function=lambda: self.tool_registry.get_goals(),
-            usage_example="[TOOL: get_goals()]"
+            name="get_generation_stats",
+            description="Get statistics about LLM generations, including count and total thinking time",
+            function=self._get_generation_stats,
+            usage_example="[TOOL: get_generation_stats()]"
         ))
         
     def _set_focus(self, value):
@@ -1451,6 +1418,19 @@ class LLMInterface:
             self.system_instructions = []
         self.system_instructions.append(instruction)
         return f"System instruction added: {instruction}"
+    
+    def _get_generation_stats(self):
+        """Get statistics about generations"""
+        stats = {
+            "generation_counter": self.generation_counter,
+            "total_thinking_time": self.total_thinking_time,
+            "avg_thinking_time": self.total_thinking_time / max(1, self.generation_counter)
+        }
+        
+        return {
+            "success": True,
+            "output": f"Generation statistics:\n- Total generations: {stats['generation_counter']}\n- Total thinking time: {stats['total_thinking_time']:.2f}s\n- Average thinking time: {stats['avg_thinking_time']:.2f}s per generation"
+        }
     
     def _handle_tool_invocations(self, response, context):
         """Parse and handle tool invocations in the response"""
@@ -1632,200 +1612,6 @@ class LLMInterface:
     def attach_to_agent(self, agent):
         """Attach this LLM interface to an agent"""
         self.agent = agent
-
-    def _add_short_term_goal(self, goal):
-        """Add a short-term goal with additional logging"""
-        logger.info(f"LLMInterface._add_short_term_goal called with goal: '{goal}'")
-        if not self.agent:
-            logger.warning("No agent attached, cannot add goal")
-            return "No agent attached, cannot add goal"
-            
-        result = self.tool_registry.goal_manager.add_short_term_goal(goal)
-        logger.info(f"Goal added, result: {result}")
-        
-        # Verify goals after adding
-        current_goals = self.tool_registry.goal_manager.get_goals()
-        logger.info(f"Current goals after adding: {current_goals}")
-        
-        return result
-
-    def _simulate_web_search(self, query):
-        """Simulate a web search by asking the LLM to generate plausible search results"""
-        if query is None:
-            return {
-                "success": False,
-                "error": "No search query provided. Please specify what to search for."
-            }
-        
-        # Use the LLM to generate simulated search results
-        prompt = f"""
-        Simulate the results of a web search for: "{query}"
-        
-        Please provide a concise summary of what someone might find when searching for this query online.
-        Include 3-5 key points or facts that would likely appear in search results.
-        Format as bullet points with brief explanations.
-        Base this on your general knowledge, but present it as if these were actual search results.
-        """
-        
-        system_message = "You are simulating a web search engine. Provide realistic, factual search results."
-        
-        try:
-            search_results = self._generate_completion(prompt, system_message)
-            return {
-                "success": True,
-                "output": f"Search results for '{query}':\n\n{search_results}"
-            }
-        except Exception as e:
-            logger.error(f"Error simulating web search: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Failed to complete web search: {str(e)}"
-            }
-            
-    def _message_user(self, message):
-        """Send a message to the user and log it"""
-        if message is None:
-            return {
-                "success": False,
-                "error": "No message provided. Please specify a message to send."
-            }
-            
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        try:
-            # Ensure the directory exists
-            os.makedirs(os.path.dirname("user_messages.txt"), exist_ok=True)
-            
-            # Write to the user messages file
-            with open("user_messages.txt", "a") as f:
-                f.write(f"\n({timestamp})\nREQUEST: {message}\nRESPONSE: Nothing Yet\n")
-                
-            logger.info(f"Message sent to user: {message}")
-            return {
-                "success": True,
-                "output": f"Message sent to user: '{message}'"
-            }
-        except Exception as e:
-            logger.error(f"Error sending message to user: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Failed to send message: {str(e)}"
-            }
-
-    def _read_user_conversations(self, num_entries=5):
-        """Read recent user conversations from the user_messages.txt file"""
-        try:
-            if not os.path.exists("user_messages.txt"):
-                return []
-                
-            with open("user_messages.txt", "r") as f:
-                content = f.read()
-                
-            # Parse the content to extract conversation entries
-            entries = []
-            current_entry = {}
-            
-            for line in content.split("\n"):
-                if line.startswith("("):
-                    # This is a timestamp, start a new entry
-                    if current_entry and "timestamp" in current_entry:
-                        entries.append(current_entry)
-                    current_entry = {"timestamp": line.strip("() ")}
-                elif line.startswith("REQUEST:"):
-                    current_entry["request"] = line[8:].strip()
-                elif line.startswith("RESPONSE:"):
-                    current_entry["response"] = line[9:].strip()
-            
-            # Add the last entry if it exists
-            if current_entry and "timestamp" in current_entry:
-                entries.append(current_entry)
-                
-            # Get the most recent entries
-            recent_entries = entries[-num_entries:] if entries else []
-            
-            # Format the entries for display
-            formatted_entries = []
-            for entry in recent_entries:
-                timestamp = entry.get("timestamp", "Unknown time")
-                request = entry.get("request", "No request")
-                response = entry.get("response", "No response")
-                
-                formatted_entries.append(f"[{timestamp}]\nAgent: {request}\nUser: {response}")
-                
-            return formatted_entries
-        except Exception as e:
-            logger.error(f"Error reading user conversations: {e}", exc_info=True)
-            return []
-            
-    def _get_latest_user_response(self):
-        """Get the latest user response if any"""
-        conversations = self._read_user_conversations(1)
-        if not conversations:
-            return "No response from user yet."
-            
-        # Extract just the user response part
-        conversation = conversations[0]
-        if "User:" not in conversation:
-            return "No response from user yet."
-            
-        response_part = conversation.split("User:", 1)[1].strip()
-        if response_part == "Nothing Yet" or response_part == "No response":
-            return "No response from user yet."
-            
-        return response_part
-
-    def _list_tools_enhanced(self):
-        """List available tools plus additional simulated capabilities"""
-        # Get the real tools
-        real_tools = self.tool_registry.list_tools()
-        
-        # Prepare the prompt for simulated tools specifically for list_tools_enhanced
-        prompt = """
-        You are helping to enhance the capabilities of an AI agent by suggesting additional tools you can dynamically handle.
-        
-        Please suggest 3-4 useful tools, beyond the standard tools.
-        For each tool, provide:
-        1. A clear name (e.g., analyze_sentiment, translate_text)
-        2. A brief description of what the tool does
-        3. A usage example showing parameters
-
-        All usage should be of the form: 
-        [TOOL: tool_name(param1=value1, param2=value2)]
-        
-        Format each tool in a numbered list with name, description, and usage fields.
-        Focus on tools that would be genuinely useful for an agent.
-        
-        These tools will be executed by the LLM when requested, not implemented in code.
-        """
-        
-        system_message = "You are a tool system. Generate a helpful list of additional tools that can be dynamically used."
-        
-        try:
-            # Generate simulated output directly using LLM
-            simulated_output = self._generate_completion(prompt, system_message)
-            
-            # Format the real tools for better display
-            formatted_real_tools = []
-            for i, tool in enumerate(real_tools, 1):
-                formatted_real_tools.append(f"{i}. {tool['name']}\n   Description: {tool['description']}\n   Usage: {tool['usage']}")
-            
-            # Return a combined result
-            return {
-                "success": True,
-                "output": f"ACTUAL TOOLS (these can be used directly):\n\n" + 
-                         "\n\n".join(formatted_real_tools) + 
-                         f"\n\nDYNAMIC CAPABILITIES (the LLM will execute these if requested):\n\n{simulated_output}"
-            }
-        except Exception as e:
-            logger.error(f"Error generating enhanced tools: {e}")
-            
-            # Fallback if there's an error
-            return {
-                "success": True,
-                "output": "ACTUAL TOOLS (these can be used directly):\n\n" + 
-                         "\n\n".join(formatted_real_tools) + 
-                         "\n\nCould not generate simulated tools due to an error."
-            }
 
 def test_connection(url=API_BASE_URL):
     """Test the connection to the API endpoint"""

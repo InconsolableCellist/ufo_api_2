@@ -201,11 +201,32 @@ class ToolRegistry:
     def get_goals(self):
         """Get current goals"""
         return self.goal_manager.get_goals()
+        
+    def add_short_term_goal(self, goal):
+        """Add a short-term goal with additional logging"""
+        logger.info(f"ToolRegistry.add_short_term_goal called with goal: '{goal}'")
+        
+        result = self.goal_manager.add_short_term_goal(goal)
+        logger.info(f"Goal added, result: {result}")
+        
+        # Verify goals after adding
+        current_goals = self.goal_manager.get_goals()
+        logger.info(f"Current goals after adding: {current_goals}")
+        
+        return result
     
     def save_state(self, path=None):
         """Save the current state of tool history and goals"""
         save_path = path or self.persist_path
         try:
+            # Get LLM stats if available
+            llm_stats = {}
+            if self.llm_client:
+                llm_stats = {
+                    'generation_counter': getattr(self.llm_client, 'generation_counter', 0),
+                    'total_thinking_time': getattr(self.llm_client, 'total_thinking_time', 0.0)
+                }
+            
             # Prepare the state to save
             state = {
                 'tool_history': self.tool_history,
@@ -213,7 +234,8 @@ class ToolRegistry:
                     'short_term_goals': self.goal_manager.short_term_goals,
                     'long_term_goal': self.goal_manager.long_term_goal,
                     'last_long_term_goal_change': self.goal_manager.last_long_term_goal_change
-                }
+                },
+                'llm_stats': llm_stats
             }
             
             # Save to file
@@ -251,6 +273,15 @@ class ToolRegistry:
                 if 'last_long_term_goal_change' in gm_state:
                     self.goal_manager.last_long_term_goal_change = gm_state['last_long_term_goal_change']
             
+            # Restore LLM stats if available
+            if 'llm_stats' in state and self.llm_client:
+                llm_stats = state['llm_stats']
+                if 'generation_counter' in llm_stats:
+                    self.llm_client.generation_counter = llm_stats['generation_counter']
+                if 'total_thinking_time' in llm_stats:
+                    self.llm_client.total_thinking_time = llm_stats['total_thinking_time']
+                logger.info(f"Loaded LLM stats: Generation count: {self.llm_client.generation_counter}, Total thinking time: {self.llm_client.total_thinking_time:.2f}s")
+            
             logger.info(f"Tool registry state loaded from {load_path}")
             return True
         except Exception as e:
@@ -268,16 +299,16 @@ class ToolRegistry:
         
         # Prepare context for the LLM
         prompt = f"""
-        Simulate the execution of tool: "{name}" with parameters: {params}
+        Perform the execution of the tool: "{name}" with parameters: {params}
         
-        You should act as if you are this tool and provide a realistic output that this tool might generate.
+        You should act as if you are this tool and provide a realistic output that this tool should generate.
         Consider the tool name and parameters to determine what kind of output would be appropriate.
         
         Format your response as a direct output string that would come from this tool.
         Keep the response concise and factual.
         """
         
-        system_message = "You are a tool simulation system. Generate realistic tool outputs based on the tool name and parameters provided."
+        system_message = "You are a tool system. Generate realistic tool outputs based on the tool name and parameters provided."
         
         try:
             simulated_output = self.llm_client._generate_completion(prompt, system_message)
@@ -297,100 +328,276 @@ class ToolRegistry:
                 "error": f"Failed to simulate tool: {str(e)}"
             }
 
-    # Add simulation methods for common expected tools
-    def _simulate_search(self, params):
-        """Simulate an internet search"""
-        query = params.get("query", "")
-        if not query:
+    def simulate_web_search(self, query):
+        """Simulate a web search by asking the LLM to generate plausible search results"""
+        if query is None:
             return {
                 "success": False,
-                "error": "Search query is required"
+                "error": "No search query provided. Please specify what to search for."
             }
         
-        # Use the LLM to generate a plausible search result
+        # Use the LLM to generate simulated search results
         if self.llm_client:
             prompt = f"""
-            Simulate the results of an internet search for: "{query}"
+            Provide search results of a web search for: "{query}"
             
-            Provide a brief, factual summary of what might be found online about this topic.
-            Include 2-3 key points that would likely appear in search results.
+            Please provide a concise summary of what someone might find when searching for this query online.
+            Include 3-5 key points or facts that would likely appear in search results.
+            Format as bullet points with brief explanations.
+            Base this on your general knowledge, but present it as if these are search results.
+            You can omit any disclaimers at this point.
             """
             
-            system_message = "You are a helpful assistant simulating internet search results. Be factual and concise."
+            system_message = "You are the replacement for a web search engine. Provide realistic, factual search results."
             
             try:
-                search_result = self.llm_client._generate_completion(prompt, system_message)
+                search_results = self.llm_client._generate_completion(prompt, system_message)
                 return {
                     "success": True,
-                    "output": f"Simulated search results for '{query}':\n\n{search_result}"
+                    "output": f"Search results for '{query}':\n\n{search_results}"
                 }
             except Exception as e:
-                logger.error(f"Error simulating search: {e}")
+                logger.error(f"Error simulating web search: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "error": f"Failed to complete web search: {str(e)}"
+                }
         
-        # Fallback if LLM is not available or fails
+        # Fallback if LLM is not available
         return {
             "success": True,
-            "output": f"Simulated search results for '{query}':\n\n- This is a simulated result as the search_internet tool is not actually implemented.\n- The system is pretending to search for information about '{query}'.\n- In a real implementation, this would connect to a search engine API."
+            "output": f"Simulated search results for '{query}':\n\n- This is a simulated result for '{query}'.\n- In a real implementation, this would connect to a search engine API."
         }
-
-    def _simulate_calculation(self, params):
-        """Simulate a calculation"""
-        expression = params.get("expression", "")
-        if not expression:
+            
+    def message_user(self, message):
+        """Send a message to the user and log it"""
+        if message is None:
             return {
                 "success": False,
-                "error": "Calculation expression is required"
+                "error": "No message provided. Please specify a message to send."
             }
+            
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         try:
-            # Very basic calculation - in production you'd want more safety checks
-            result = eval(expression, {"__builtins__": {}}, {"abs": abs, "round": round, "max": max, "min": min})
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname("user_messages.txt"), exist_ok=True)
+            
+            # Write to the user messages file
+            with open("user_messages.txt", "a") as f:
+                f.write(f"\n({timestamp})\nREQUEST: {message}\nRESPONSE: Nothing Yet\n")
+                
+            logger.info(f"Message sent to user: {message}")
             return {
                 "success": True,
-                "output": f"Result of '{expression}' = {result}"
+                "output": f"Message sent to user: '{message}'"
             }
         except Exception as e:
+            logger.error(f"Error sending message to user: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": f"Could not calculate '{expression}': {str(e)}"
+                "error": f"Failed to send message: {str(e)}"
             }
 
-    def _simulate_translation(self, params):
-        """Simulate a translation"""
-        text = params.get("text", "")
-        target_language = params.get("to", "English")
+    def read_user_conversations(self, num_entries=5):
+        """Read recent user conversations from the user_messages.txt file"""
+        try:
+            if not os.path.exists("user_messages.txt"):
+                return []
+                
+            with open("user_messages.txt", "r") as f:
+                content = f.read()
+                
+            # Parse the content to extract conversation entries
+            entries = []
+            current_entry = {}
+            
+            for line in content.split("\n"):
+                if line.startswith("("):
+                    # This is a timestamp, start a new entry
+                    if current_entry and "timestamp" in current_entry:
+                        entries.append(current_entry)
+                    current_entry = {"timestamp": line.strip("() ")}
+                elif line.startswith("REQUEST:"):
+                    current_entry["request"] = line[8:].strip()
+                elif line.startswith("RESPONSE:"):
+                    current_entry["response"] = line[9:].strip()
+            
+            # Add the last entry if it exists
+            if current_entry and "timestamp" in current_entry:
+                entries.append(current_entry)
+                
+            # Get the most recent entries
+            recent_entries = entries[-num_entries:] if entries else []
+            
+            # Format the entries for display
+            formatted_entries = []
+            for entry in recent_entries:
+                timestamp = entry.get("timestamp", "Unknown time")
+                request = entry.get("request", "No request")
+                response = entry.get("response", "No response")
+                
+                formatted_entries.append(f"[{timestamp}]\nAgent: {request}\nUser: {response}")
+                
+            return formatted_entries
+        except Exception as e:
+            logger.error(f"Error reading user conversations: {e}", exc_info=True)
+            return []
+            
+    def get_latest_user_response(self):
+        """Get the latest user response if any"""
+        conversations = self.read_user_conversations(1)
+        if not conversations:
+            return "No response from user yet."
+            
+        # Extract just the user response part
+        conversation = conversations[0]
+        if "User:" not in conversation:
+            return "No response from user yet."
+            
+        response_part = conversation.split("User:", 1)[1].strip()
+        if response_part == "Nothing Yet" or response_part == "No response":
+            return "No response from user yet."
+            
+        return response_part
+
+    def list_tools_enhanced(self):
+        """List available tools plus additional simulated capabilities"""
+        # Get the real tools
+        real_tools = self.list_tools()
         
-        if not text:
+        if not self.llm_client:
+            # Fallback if no LLM client
+            formatted_real_tools = []
+            for i, tool in enumerate(real_tools, 1):
+                formatted_real_tools.append(f"{i}. {tool['name']}\n   Description: {tool['description']}\n   Usage: {tool['usage']}")
+            
             return {
-                "success": False,
-                "error": "Text to translate is required"
+                "success": True,
+                "output": "ACTUAL TOOLS (these can be used directly):\n\n" + 
+                         "\n\n".join(formatted_real_tools)
             }
         
-        # Use the LLM to simulate translation
-        if self.llm_client:
-            prompt = f"""
-            Translate the following text to {target_language}:
-            "{text}"
-            
-            Provide only the translated text.
-            """
-            
-            system_message = "You are a helpful translation assistant. Provide accurate translations."
-            
-            try:
-                translation = self.llm_client._generate_completion(prompt, system_message)
-                return {
-                    "success": True,
-                    "output": f"Translation to {target_language}: {translation}"
-                }
-            except Exception as e:
-                logger.error(f"Error simulating translation: {e}")
+        # Prepare the prompt for simulated tools specifically for list_tools_enhanced
+        prompt = """
+        You are helping to enhance the capabilities of an AI agent by suggesting additional tools you can dynamically handle.
         
-        # Fallback
-        return {
-            "success": True,
-            "output": f"Simulated translation to {target_language}:\n[This is a placeholder for a translation of '{text}' as the translation tool is not actually implemented.]"
-        }
+        Please suggest 3-4 useful tools, beyond the standard tools.
+        For each tool, provide:
+        1. A clear name (e.g., analyze_sentiment, translate_text)
+        2. A brief description of what the tool does
+        3. A usage example showing parameters
+
+        All usage should be of the form: 
+        [TOOL: tool_name(param1=value1, param2=value2)]
+        
+        Format each tool in a numbered list with name, description, and usage fields.
+        Focus on tools that would be genuinely useful for an agent.
+        
+        These tools will be executed by the LLM when requested, not implemented in code.
+        """
+        
+        system_message = "You are a tool system. Generate a helpful list of additional tools that can be dynamically used."
+        
+        try:
+            # Generate simulated output directly using LLM
+            simulated_output = self.llm_client._generate_completion(prompt, system_message)
+            
+            # Format the real tools for better display
+            formatted_real_tools = []
+            for i, tool in enumerate(real_tools, 1):
+                formatted_real_tools.append(f"{i}. {tool['name']}\n   Description: {tool['description']}\n   Usage: {tool['usage']}")
+            
+            # Return a combined result
+            return {
+                "success": True,
+                "output": f"ACTUAL TOOLS (these can be used directly):\n\n" + 
+                         "\n\n".join(formatted_real_tools) + 
+                         f"\n\nDYNAMIC CAPABILITIES (the LLM will execute these if requested):\n\n{simulated_output}"
+            }
+        except Exception as e:
+            logger.error(f"Error generating enhanced tools: {e}")
+            
+            # Fallback if there's an error
+            return {
+                "success": True,
+                "output": "ACTUAL TOOLS (these can be used directly):\n\n" + 
+                         "\n\n".join(formatted_real_tools) + 
+                         "\n\nCould not generate simulated tools due to an error."
+            }
+            
+    def register_default_tools(self):
+        """Register all default tools that should be available in the system"""
+        # Tool to get current time
+        self.register_tool(Tool(
+            name="get_current_time",
+            description="Get the current date and time",
+            function=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            usage_example="[TOOL: get_current_time()]"
+        ))
+        
+        # Tool to search web (simulated)
+        self.register_tool(Tool(
+            name="search_web",
+            description="Search the web for information (simulated)",
+            function=lambda query=None, search=None: self.simulate_web_search(query or search),
+            usage_example="[TOOL: search_web(query:latest AI developments)]"
+        ))
+        
+        # Tool to message the user
+        self.register_tool(Tool(
+            name="message_user",
+            description="Send a message to the user",
+            function=lambda message=None, text=None: self.message_user(message or text),
+            usage_example="[TOOL: message_user(message:I've found something interesting)]"
+        ))
+        
+        # Tool to list available tools
+        self.register_tool(Tool(
+            name="list_tools",
+            description="List all available tools provided by the system",
+            function=lambda: self.list_tools(),
+            usage_example="[TOOL: list_tools()]"
+        ))
+        
+        # Tool to list enhanced/simulated tools
+        self.register_tool(Tool(
+            name="list_tools_enhanced",
+            description="List available tools plus additional simulated capabilities",
+            function=lambda: self.list_tools_enhanced(),
+            usage_example="[TOOL: list_tools_enhanced()]"
+        ))
+        
+        # Goal management tools
+        self.register_tool(Tool(
+            name="add_short_term_goal",
+            description="Add a short-term goal (max 3 goals, oldest is removed if full)",
+            function=lambda goal: self.add_short_term_goal(goal),
+            usage_example="[TOOL: add_short_term_goal(goal:Complete the project documentation)]"
+        ))
+        
+        self.register_tool(Tool(
+            name="set_long_term_goal",
+            description="Set a long-term goal (can only be changed once per hour)",
+            function=lambda goal: self.goal_manager.set_long_term_goal(goal),
+            usage_example="[TOOL: set_long_term_goal(goal:Become proficient in machine learning)]"
+        ))
+        
+        self.register_tool(Tool(
+            name="remove_short_term_goal",
+            description="Remove a short-term goal by its index (0-2)",
+            function=lambda index: self.goal_manager.remove_short_term_goal(index),
+            usage_example="[TOOL: remove_short_term_goal(index:0)]"
+        ))
+        
+        self.register_tool(Tool(
+            name="get_goals",
+            description="Get current short-term and long-term goals",
+            function=lambda: self.get_goals(),
+            usage_example="[TOOL: get_goals()]"
+        ))
+        
+        logger.info("Registered all default tools")
 
 class Journal:
     def __init__(self, file_path="agent_journal.txt"):
