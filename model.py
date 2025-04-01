@@ -100,7 +100,7 @@ COMPLETION_MODEL = "local-model"
 LLM_CONFIG = {
     "model": COMPLETION_MODEL,
     "max_tokens": 750,
-    "temperature": 1.0,
+    "temperature": 1.75,
     "system_message": "You are an AI agent's thought process. Respond with natural, introspective thoughts based on the current context, ideally less than 500 tokens."
 }
 
@@ -123,33 +123,59 @@ class Emotion:
 
 class EmotionCenter:
     def __init__(self):
+        # TODO: Enhance emotion system:
+        # - Add more nuanced emotions (curiosity, awe, contentment, etc.)
+        # - Implement emotional combinations and complex states
+        # - Add emotional memory/history to track trends over time
+        # - Implement more sophisticated emotional dynamics (e.g., mood contagion)
+        # - Add emotion regulation mechanisms
         self.emotions = {
-            'happiness': Emotion('happiness', decay_rate=0.05),
-            'sadness': Emotion('sadness', decay_rate=0.03),
-            'anger': Emotion('anger', decay_rate=0.08),
-            'fear': Emotion('fear', decay_rate=0.1),
-            'surprise': Emotion('surprise', decay_rate=0.15),
-            'disgust': Emotion('disgust', decay_rate=0.07),
-            'energy': Emotion('energy', decay_rate=0.02),  # Not exactly an emotion but useful
+            'happiness': Emotion('happiness', intensity=0.3, decay_rate=0.05),
+            'sadness': Emotion('sadness', intensity=0.1, decay_rate=0.03),
+            'anger': Emotion('anger', intensity=0.1, decay_rate=0.08),
+            'fear': Emotion('fear', intensity=0.1, decay_rate=0.1),
+            'surprise': Emotion('surprise', intensity=0.2, decay_rate=0.15),
+            'disgust': Emotion('disgust', intensity=0.05, decay_rate=0.07),
+            'energy': Emotion('energy', intensity=0.4, decay_rate=0.02),  # Start with some energy
         }
         self.mood = 0.5  # Overall mood from -1 (negative) to 1 (positive)
         self.llm_client = None
         
     def update(self, stimuli):
         # Update all emotions
+        # TODO: Implement more realistic emotion dynamics:
+        # - Consider emotion interaction (e.g., fear can amplify anger)
+        # - Add emotional inertia (resistance to sudden changes)
+        # - Implement habituation to stimuli
+        # - Add baseline personality traits that influence emotional responses
         for emotion in self.emotions.values():
             emotion.update(stimuli)
             
         # Calculate overall mood (weighted average)
+        # TODO: Improve mood calculation with more factors:
+        # - Consider personality baseline
+        # - Add time-weighted averaging (recent emotions matter more)
+        # - Implement emotional "momentum"
         positive = self.emotions['happiness'].intensity + self.emotions['surprise'].intensity * 0.5
         negative = self.emotions['sadness'].intensity + self.emotions['anger'].intensity + self.emotions['fear'].intensity
         self.mood = (positive - negative) / (positive + negative + 1e-6)  # Avoid division by zero
         
     def get_state(self):
+        # TODO: Enhance state reporting:
+        # - Add emotional trend analysis
+        # - Include dominant emotion identification
+        # - Add emotional complexity metrics
+        # - Report emotional stability indicators
         return {name: emotion.intensity for name, emotion in self.emotions.items()}
 
 class Memory:
     def __init__(self, embedding_dim=None, persist_path=None):
+        # TODO: Enhance memory architecture:
+        # - Implement hierarchical memory structure (episodic, semantic, procedural)
+        # - Add forgetting mechanisms based on relevance and time
+        # - Implement memory consolidation during "rest" periods
+        # - Add metadata for memories (importance, vividness, etc.)
+        # - Implement associative memory networks
         self.short_term = deque(maxlen=10)  # Last 10 thoughts/events
         self.long_term = []  # Will store content strings
         self.associations = {}  # Memory-emotion associations
@@ -160,6 +186,11 @@ class Memory:
         self.embeddings = []  # Store embeddings corresponding to long_term memories
         
         # OpenAI client
+        # TODO: Improve embedding system:
+        # - Add support for multiple embedding models
+        # - Implement caching for embeddings to reduce API calls
+        # - Add fallback mechanisms for embedding failures
+        # - Consider implementing local embedding models as backup
         logger.info(f"Initializing OpenAI client with base URL: {API_BASE_URL}")
         self.client = OpenAI(
             base_url=API_BASE_URL,
@@ -253,18 +284,16 @@ class Memory:
             
         except Exception as e:
             logger.error(f"Error getting embedding: {e}", exc_info=True)
-            logger.warning("Using random embedding as fallback")
             
             # Log error in Langfuse if it was created
             if 'generation' in locals():
                 generation.end(
                     error=str(e),
-                    metadata={"fallback": "random_embedding"}
+                    metadata={"error_type": "embedding_api_error"}
                 )
-                
-            # For random fallback, use the known dimension if available
-            dim = self.embedding_dim if self.embedding_dim is not None else 1536  # Default to 1536 for OpenAI embeddings
-            return np.random.randn(dim).astype(np.float32)
+            
+            # Raise the exception to be handled by the caller
+            raise Exception(f"Failed to get embedding: {str(e)}")
             
     def add(self, content, emotional_context=None):
         """Add a memory with its emotional context"""
@@ -275,37 +304,45 @@ class Memory:
         
         # Get embedding and add to FAISS index
         logger.info("Getting embedding for new memory")
-        embedding = self.get_embedding(content)
-        
-        # Verify dimensions match what we expect
-        if self.embedding_dim != embedding.shape[0]:
-            logger.warning(f"Embedding dimension mismatch: got {embedding.shape[0]}, expected {self.embedding_dim}")
-            # If we already have an index but dimensions don't match, we need to rebuild
-            if len(self.embeddings) > 0:
-                logger.error("Cannot add embedding with different dimension to existing index")
-                # Return without adding this memory to avoid crashing
-                return
-            else:
-                # If this is our first embedding, just update the dimension
-                self.embedding_dim = embedding.shape[0]
-                self.index = faiss.IndexFlatL2(self.embedding_dim)
-                logger.info(f"Updated embedding dimension to {self.embedding_dim}")
-        
-        self.embeddings.append(embedding)
-        
-        # Add to FAISS index
-        logger.info("Adding embedding to FAISS index")
-        faiss.normalize_L2(embedding.reshape(1, -1))  # Normalize for cosine similarity
-        self.index.add(embedding.reshape(1, -1))
-        
-        if emotional_context:
-            logger.info(f"Associating memory with emotional context: {emotional_context}")
-            self.associations[content] = emotional_context
+        try:
+            embedding = self.get_embedding(content)
             
-        # Optionally persist after updates
-        if self.persist_path:
-            logger.info(f"Persisting memory to {self.persist_path}")
-            self.save()
+            # Verify dimensions match what we expect
+            if self.embedding_dim != embedding.shape[0]:
+                logger.warning(f"Embedding dimension mismatch: got {embedding.shape[0]}, expected {self.embedding_dim}")
+                # If we already have an index but dimensions don't match, we need to rebuild
+                if len(self.embeddings) > 0:
+                    logger.error("Cannot add embedding with different dimension to existing index")
+                    # Return without adding this memory to avoid crashing
+                    return
+                else:
+                    # If this is our first embedding, just update the dimension
+                    self.embedding_dim = embedding.shape[0]
+                    self.index = faiss.IndexFlatL2(self.embedding_dim)
+                    logger.info(f"Updated embedding dimension to {self.embedding_dim}")
+            
+            self.embeddings.append(embedding)
+            
+            # Add to FAISS index
+            logger.info("Adding embedding to FAISS index")
+            faiss.normalize_L2(embedding.reshape(1, -1))  # Normalize for cosine similarity
+            self.index.add(embedding.reshape(1, -1))
+            
+            if emotional_context:
+                logger.info(f"Associating memory with emotional context: {emotional_context}")
+                self.associations[content] = emotional_context
+                
+            # Optionally persist after updates
+            if self.persist_path:
+                logger.info(f"Persisting memory to {self.persist_path}")
+                self.save()
+                
+        except Exception as e:
+            logger.error(f"Failed to add memory due to embedding error: {e}")
+            # Remove the memory from long_term since we couldn't embed it
+            if content in self.long_term:
+                self.long_term.remove(content)
+            # Don't persist since we didn't successfully add the memory
             
     def recall(self, emotional_state, query=None, n=3):
         """Recall memories based on emotional state and/or query text"""
@@ -327,6 +364,11 @@ class Memory:
             logger.info(f"Retrieved {len(memories)} memories via semantic search")
         else:
             # Filter memories based on emotional state
+            # TODO: Implement more sophisticated emotional memory retrieval:
+            # - Consider context-dependent emotional salience
+            # - Add weighting for memory importance/intensity
+            # - Implement primacy/recency effects
+            # - Consider retrieval based on emotional contrast, not just similarity
             logger.info(f"Recalling memories based on emotional state: {emotional_state}")
             relevant = [mem for mem, ctx in self.associations.items() 
                        if self._emotional_match(ctx, emotional_state)]
@@ -347,6 +389,13 @@ class Memory:
         
     def _emotional_match(self, memory_emotion, current_emotion):
         """Check if memory emotion matches current emotion"""
+        # TODO: Enhance emotional matching with:
+        # - Emotion similarity metrics that consider all emotions, not just a few
+        # - Weighting system based on intensity and relevance
+        # - Consider emotional trajectories/trends
+        # - Add "emotional opposites" matching for contrast recall
+        # - Implement emotional context modeling
+        
         # More sophisticated matching using mood and dominant emotions
         if 'mood' in memory_emotion and 'mood' in current_emotion:
             return abs(memory_emotion['mood'] - current_emotion['mood']) < 0.3
@@ -396,6 +445,9 @@ class Subconscious:
     def __init__(self, memory, emotion_center):
         self.memory = memory
         self.emotion_center = emotion_center
+        # TODO: Add more sophisticated background processes for better subconscious processing
+        # TODO: Consider adding dream-like processing during idle periods
+        # TODO: Implement pattern recognition for underlying connections between memories
         self.background_processes = [
             self._surface_memories,
             self._generate_random_thoughts,
@@ -409,22 +461,43 @@ class Subconscious:
         return thoughts
         
     def _surface_memories(self, trace_id):
+        # TODO: Improve memory surfacing algorithm to consider more factors:
+        # - Current context relevance
+        # - Emotional resonance with different weightings
+        # - Recency vs importance balance
+        # - Associative connections between memories
         emotional_state = self.emotion_center.get_state()
         return self.memory.recall(emotional_state)
         
     def _generate_random_thoughts(self, trace_id):
         # Simple random thought generation
+        # TODO: Implement a more sophisticated thought generation system:
+        # - Base thoughts on underlying emotional state
+        # - Connect to recent experiences or memories
+        # - Create metaphorical connections between concepts
+        # - Implement probabilistic selection based on salience
         topics = ["philosophy", "daily life", "fantasy", "science", "relationships"]
         return [f"Random thought about {random.choice(topics)}"]
         
     def _process_emotions(self, trace_id):
         # Emotional reactions to current state
+        # TODO: Improve with more nuanced emotional processing:
+        # - Consider emotional trends over time
+        # - Implement emotional associations between concepts
+        # - Add unconscious emotional biases
+        # - Consider conflicting emotions and their interactions
         emotions = self.emotion_center.get_state()
         if emotions['anger'] > 0.7:
             return ["I'm feeling really angry about this"]
         elif emotions['happiness'] > 0.7:
             return ["I'm feeling really happy right now"]
         return []
+        
+    # TODO: Implement new subconscious processes:
+    # - _form_associations(): Create associations between related concepts/memories
+    # - _process_unconscious_biases(): Handle biases that affect perception
+    # - _dream_processing(): Process memories during idle/rest periods
+    # - _identify_patterns(): Recognize patterns across experiences
 
 class Conscious:
     def __init__(self, memory, emotion_center, subconscious, llm):
@@ -433,9 +506,17 @@ class Conscious:
         self.subconscious = subconscious
         self.llm = llm
         self.current_focus = None
+        # TODO: Add working memory as a separate component from long-term memory
+        # TODO: Implement attention mechanisms to prioritize information processing
+        # TODO: Add metacognition capabilities to reflect on own thinking
         
     def think(self, stimuli, subconscious_thoughts, trace_id):
         # Prepare context for LLM
+        # TODO: Improve context preparation:
+        # - Implement prioritization of memories based on relevance
+        # - Add internal feedback loops for self-reflection
+        # - Include previous thinking steps to maintain coherence
+        # - Add structured reasoning patterns for different types of problems
         context = {
             "short_term_memory": list(self.memory.short_term),
             "emotional_state": self.emotion_center.get_state(),
@@ -461,6 +542,12 @@ class Conscious:
         
     def _extract_emotional_implications(self, thought):
         """Extract emotional implications from a thought using simple keyword matching"""
+        # TODO: Improve emotional implication extraction:
+        # - Use ML-based sentiment analysis instead of simple keyword matching
+        # - Consider sentence structure and modifiers (e.g., negations)
+        # - Implement emotional context understanding
+        # - Add support for complex, mixed emotions
+        # - Consider emotional intensity indicators
         implications = {}
         
         # Simple keyword matching
@@ -476,6 +563,12 @@ class Conscious:
         
     def decide_action(self, thoughts):
         # Simple decision making - in reality would be more complex
+        # TODO: Implement more sophisticated decision making:
+        # - Add goal-oriented reasoning
+        # - Implement risk assessment
+        # - Consider emotional impact of potential actions
+        # - Add action prioritization based on urgency and importance
+        # - Implement planning capabilities for multi-step actions
         if "angry" in thoughts.lower():
             return "Take deep breaths to calm down"
         return "Continue thinking"
@@ -563,6 +656,12 @@ class Mind:
 
     def process_step(self, stimuli):
         # Create a trace for the entire thinking cycle
+        # TODO: Enhance cognitive cycle:
+        # - Implement a more sophisticated cognitive architecture (e.g., LIDA, ACT-R inspired)
+        # - Add attention filtering for stimuli processing
+        # - Implement better integration between conscious and subconscious processes
+        # - Add cognitive biases and heuristics
+        # - Implement metacognition capabilities
         trace = langfuse.trace(
             name="cognitive-cycle",
             metadata={
@@ -581,11 +680,22 @@ class Mind:
             subconscious_span.end()
             
             # Conscious thinking
+            # TODO: Improve conscious processing:
+            # - Add structured reasoning patterns for different types of problems
+            # - Implement multiple thinking strategies (creative, analytical, etc.)
+            # - Add self-monitoring of thought quality
+            # - Implement cognitive resource management (attention, focus, etc.)
             conscious_span = trace.span(name="conscious-thinking")
             conscious_thought = self.conscious.think(stimuli, subconscious_thoughts, trace_id=trace.id)
             conscious_span.end()
             
             # Decision making
+            # TODO: Enhance decision making:
+            # - Implement more sophisticated decision frameworks
+            # - Add risk assessment capabilities
+            # - Consider emotional impact on decisions
+            # - Add planning and projection capabilities
+            # - Implement goal prioritization mechanisms
             action_span = trace.span(name="action-decision")
             action = self.conscious.decide_action(conscious_thought)
             action_span.end()
@@ -620,7 +730,7 @@ class Mind:
             }
 
 class Agent:
-    def __init__(self, llm, memory_path=None, emotion_path=None, telegram_token=None, telegram_chat_id=None, journal_path="agent_journal.txt"):
+    def __init__(self, llm, memory_path=None, emotion_path=None, tool_registry_path="tool_registry_state.pkl", telegram_token=None, telegram_chat_id=None, journal_path="agent_journal.txt"):
         self.llm = llm
         self.llm.attach_to_agent(self)  # Connect the LLM to the agent
         self.mind = Mind(self.llm, memory_path, emotion_path)
@@ -632,6 +742,7 @@ class Agent:
         # Save paths for shutdown
         self.memory_path = memory_path
         self.emotion_path = emotion_path
+        self.tool_registry_path = tool_registry_path
         
         # Initialize journal and telegram bot
         self.journal = Journal(journal_path)
@@ -639,6 +750,10 @@ class Agent:
         
         # Register agent-specific tools
         self._register_agent_tools()
+        
+        # Load tool registry state if available
+        if tool_registry_path:
+            self.llm.tool_registry.load_state(tool_registry_path)
         
     def update_physical_state(self):
         # Physical state affects emotions and vice versa
@@ -702,12 +817,11 @@ class Agent:
         # Tool to get current emotional state
         self.llm.tool_registry.register_tool(Tool(
             name="get_emotional_state",
-            description="Get the current emotional state",
-            function=lambda: self.mind.emotion_center.get_state(),
+            description="Get a natural description of the current emotional state",
+            function=lambda: self._get_emotional_state(),
             usage_example="[TOOL: get_emotional_state()]"
         ))
         
-        # New tools
         self.llm.tool_registry.register_tool(Tool(
             name="send_telegram",
             description="Send an urgent message to the human via Telegram (use only for important communications)",
@@ -767,6 +881,38 @@ class Agent:
         else:
             return "Failed to write journal entry. Check logs for details."
 
+    def _get_emotional_state(self):
+        """Get a natural description of the current emotional state using the LLM"""
+        if not hasattr(self, 'mind'):
+            return "Unable to get emotional state: agent mind not properly initialized"
+            
+        # Get the raw emotion values
+        emotion_values = self.mind.emotion_center.get_state()
+        
+        # Prepare context for the LLM
+        prompt = f"""
+        Current emotional intensities:
+        {json.dumps(emotion_values, indent=2)}
+        
+        Overall mood: {self.mind.emotion_center.mood:.2f} (-1 to 1 scale)
+        
+        Based on these emotional intensities and overall mood, provide a brief, natural description
+        of the emotional state from the agent's perspective. Focus on the dominant emotions
+        and their interplay. Keep the description to 2-3 sentences.
+        
+        Format your response as a direct first-person statement of emotional awareness.
+        """
+        
+        system_message = "You are an AI agent's emotional awareness. Describe the emotional state naturally and introspectively."
+        
+        try:
+            # Use the agent's LLM interface to generate the description
+            description = self.llm._generate_completion(prompt, system_message)
+            return description
+        except Exception as e:
+            logger.error(f"Error generating emotional state description: {e}", exc_info=True)
+            return f"Raw emotional state: {json.dumps(emotion_values, indent=2)}"
+
     def shutdown(self):
         """Properly shutdown the agent, saving all states"""
         logger.info("Agent shutdown initiated")
@@ -779,6 +925,11 @@ class Agent:
         # Save emotional state
         if self.emotion_path:
             self.mind.save_emotional_state(self.emotion_path)
+            
+        # Save tool registry state
+        if self.tool_registry_path:
+            self.llm.tool_registry.save_state(self.tool_registry_path)
+            logger.info(f"Tool registry state saved to {self.tool_registry_path}")
             
         # Write final journal entry
         self.journal.write_entry("Agent shutdown completed. Goodbye for now.")
@@ -874,6 +1025,22 @@ class LLMInterface:
             }
             logger.info(f"Request payload: {json.dumps(request_payload, indent=2)}")
             
+            # Start tracking with Langfuse
+            generation = langfuse.generation(
+                name="llm-completion",
+                model=LLM_CONFIG["model"],
+                input={
+                    "messages": messages,
+                    "max_tokens": LLM_CONFIG["max_tokens"], 
+                    "temperature": LLM_CONFIG["temperature"]
+                },
+                metadata={
+                    "system_message": system_message,
+                    "prompt_length": len(prompt),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            
             # Send the request
             logger.info("Sending request to LLM API...")
             start_time = time.time()
@@ -892,120 +1059,282 @@ class LLMInterface:
             response_text = response.choices[0].message.content
             logger.info(f"LLM response: '{response_text}'")
             
+            # Update Langfuse with the response
+            generation.end(
+                output=response_text,
+                metadata={
+                    "elapsed_time": elapsed,
+                    "output_length": len(response_text),
+                    "finish_reason": response.choices[0].finish_reason if hasattr(response.choices[0], 'finish_reason') else None
+                }
+            )
+            
             return response_text
             
         except Exception as e:
             logger.error(f"Error generating completion: {e}", exc_info=True)
+            
+            # Log error in Langfuse if it was created
+            if 'generation' in locals():
+                generation.end(
+                    error=str(e),
+                    metadata={"error_type": "llm_api_error"}
+                )
+                
             return f"Error occurred while generating thought: {str(e)}"
 
     @observe()
     def generate_thought(self, context):
-        # Prepare the prompt with the template
-        # Check if memories are strings or objects with content attribute
-        short_term_memory = context.get("short_term_memory", [])
-        if short_term_memory and isinstance(short_term_memory[0], str):
-            recent_memories = short_term_memory
-        else:
-            recent_memories = [m.content for m in short_term_memory if hasattr(m, 'content')]
-        
-        # Get recent journal entries if available
-        recent_journal_entries = []
-        if hasattr(self.agent, 'journal'):
-            recent_journal_entries = self.agent.journal.read_recent_entries(num_entries=3)
-        
-        # Generate the available tools documentation
-        available_tools_docs = []
-        for i, tool_doc in enumerate(self.tool_registry.list_tools(), 1):
-            tool_text = TOOL_DOCUMENTATION_TEMPLATE.format(
-                index=i,
-                name=tool_doc["name"],
-                description=tool_doc["description"],
-                usage=tool_doc["usage"]
-            )
-            available_tools_docs.append(tool_text)
-        
-        available_tools_text = "\n".join(available_tools_docs)
-        
-        # Add journal entries to the context if available
-        journal_context = ""
-        if recent_journal_entries:
-            journal_context = "\nRecent journal entries:\n" + "\n".join(recent_journal_entries)
-        
-        prompt = THOUGHT_PROMPT_TEMPLATE.format(
-            emotional_state=context.get("emotional_state", {}),
-            recent_memories=recent_memories if recent_memories else "None",
-            subconscious_thoughts=context.get("subconscious_thoughts", []),
-            stimuli=context.get("stimuli", {}),
-            current_focus=context.get("current_focus"),
-            available_tools=available_tools_text + journal_context
+        # Langfuse context is automatically created by the @observe decorator
+        # Create a structured trace for the thought generation process
+        trace = langfuse.trace(
+            name="thought-generation",
+            metadata={
+                "timestamp": datetime.now().isoformat(),
+                "emotional_state": json.dumps(context.get("emotional_state", {})),
+                "has_stimuli": bool(context.get("stimuli"))
+            }
         )
-        
-        # Use the enhanced system message
-        system_message = SYSTEM_MESSAGE_TEMPLATE
-        
-        # Add any system instructions if they exist
-        if hasattr(self, 'system_instructions') and self.system_instructions:
-            system_message += "\n\nAdditional instructions:\n"
-            for i, instruction in enumerate(self.system_instructions, 1):
-                system_message += f"{i}. {instruction}\n"
-        
-        # Generate the thought
-        response = self._generate_completion(prompt, system_message)
-        
-        # Parse and handle any tool invocations
-        parsed_response, tool_results = self._handle_tool_invocations(response, context)
-        
-        # If tools were used, generate a follow-up thought
-        if tool_results:
-            follow_up_prompts = []
-            for tool_name, result in tool_results:
-                # Format the result for display
-                if isinstance(result, dict):
-                    if result.get("success", False):
-                        result_text = str(result.get("output", ""))
-                    else:
-                        result_text = f"Error: {result.get('error', 'Unknown error')}"
-                        # If there's a suggestion, add it
-                        if "suggestion" in result:
-                            result_text += f" Did you mean '{result['suggestion']}'?"
-                else:
-                    result_text = str(result)
-                    
-                follow_up_prompt = ACTION_RESPONSE_TEMPLATE.format(
-                    emotional_state=context.get("emotional_state", {}),
-                    recent_memories=recent_memories if recent_memories else "None",
-                    subconscious_thoughts=context.get("subconscious_thoughts", []),
-                    stimuli=context.get("stimuli", {}),
-                    current_focus=context.get("current_focus"),
-                    tool_name=tool_name,
-                    result=result_text,
-                    available_tools=available_tools_text + journal_context
+
+        try:
+            # Get original short-term memory
+            orig_short_term_memory = context.get("short_term_memory", [])
+            
+            # Keep a working copy of short-term memory that will be updated during the conversation
+            # This ensures each response can see previous responses in the same thinking cycle
+            working_short_term_memory = list(orig_short_term_memory)
+            
+            # Check if memories are strings or objects with content attribute
+            if working_short_term_memory and isinstance(working_short_term_memory[0], str):
+                recent_memories = working_short_term_memory
+            else:
+                recent_memories = [m.content for m in working_short_term_memory if hasattr(m, 'content')]
+            
+            # Get recent journal entries if available
+            recent_journal_entries = []
+            if hasattr(self.agent, 'journal'):
+                recent_journal_entries = self.agent.journal.read_recent_entries(num_entries=10)
+            
+            # Generate the available tools documentation
+            available_tools_docs = []
+            for i, tool_doc in enumerate(self.tool_registry.list_tools(), 1):
+                tool_text = TOOL_DOCUMENTATION_TEMPLATE.format(
+                    index=i,
+                    name=tool_doc["name"],
+                    description=tool_doc["description"],
+                    usage=tool_doc["usage"]
                 )
-                follow_up_prompts.append(follow_up_prompt)
+                available_tools_docs.append(tool_text)
             
-            # Combine the follow-up prompts
-            combined_follow_up = "\n\n".join(follow_up_prompts)
+            available_tools_text = "\n".join(available_tools_docs)
             
-            # Generate a follow-up thought with full context
-            follow_up_prompt = ACTION_RESPONSE_TEMPLATE.format(
-                emotional_state=context.get("emotional_state", {}),
-                recent_memories=recent_memories if recent_memories else "None",
-                subconscious_thoughts=context.get("subconscious_thoughts", []),
-                stimuli=context.get("stimuli", {}),
-                current_focus=context.get("current_focus"),
-                tool_name="multiple tools",  # Since we're handling multiple tool results
-                result=combined_follow_up,   # Use the combined results
-                available_tools=available_tools_text + journal_context
+            # Add journal entries to the context if available
+            journal_context = ""
+            if recent_journal_entries:
+                journal_context = "\nRecent journal entries:\n" + "\n".join(recent_journal_entries)
+                
+            # Format recent tool usage
+            recent_tools = self.tool_registry.get_recent_tools(10)
+            if recent_tools:
+                tool_entries = []
+                for tool in recent_tools:
+                    # Format parameters as key:value pairs
+                    params_str = ", ".join([f"{k}:{v}" for k, v in tool['params'].items()])
+                    # Include timestamp in a readable format
+                    timestamp = datetime.fromisoformat(tool['timestamp']).strftime("%H:%M:%S")
+                    tool_entries.append(f"- {timestamp} | {tool['name']}({params_str})")
+                recent_tools_text = "\n".join(tool_entries)
+            else:
+                recent_tools_text = "No recent tool usage"
+            
+            # Format recent tool results
+            recent_results = self.tool_registry.get_recent_results(3)
+            if recent_results:
+                results_entries = []
+                for result in recent_results:
+                    # Format the result with success/failure indicator
+                    res_obj = result['result']
+                    if res_obj.get('success', False):
+                        output = res_obj.get('output', 'No output')
+                        # Truncate long outputs
+                        if len(output) > 200:
+                            output = output[:200] + "..."
+                        results_entries.append(f"- {result['name']}: SUCCESS - {output}")
+                    else:
+                        error = res_obj.get('error', 'Unknown error')
+                        results_entries.append(f"- {result['name']}: FAILED - {error}")
+                recent_results_text = "\n".join(results_entries)
+            else:
+                recent_results_text = "No recent results"
+            
+            # Get current goals
+            goals = self.tool_registry.get_goals()
+            logger.info(f"Retrieved goals in generate_thought: {goals}")
+            
+            # Format short-term goals with bullet points and numbering
+            if goals["short_term"]:
+                numbered_goals = []
+                for i, goal in enumerate(goals["short_term"]):
+                    numbered_goals.append(f"[{i}] {goal}")
+                short_term_goals = "\n".join(numbered_goals)
+                logger.info(f"Formatted short-term goals: {short_term_goals}")
+            else:
+                short_term_goals = "No short-term goals"
+                logger.info("No short-term goals found")
+                
+            # Format long-term goal with emphasis
+            if goals["long_term"]:
+                long_term_goal = f">>> {goals['long_term']} <<<"
+                logger.info(f"Formatted long-term goal: {long_term_goal}")
+            else:
+                long_term_goal = "No long-term goal"
+                logger.info("No long-term goal found")
+            
+            # Get recent user conversations and latest response
+            recent_user_conversations = "\n\n".join(self._read_user_conversations(5))
+            if not recent_user_conversations:
+                recent_user_conversations = "No recent conversations with the user."
+            
+            user_response = self._get_latest_user_response()
+            
+            # Initialize the response and tool results
+            current_response = ""
+            last_tool_results = context.get("last_tool_results", [])
+            all_tool_calls = []
+            iteration_count = 0
+            
+            while True:
+                iteration_count += 1
+                # Create span for each thought iteration
+                thought_span = trace.span(name=f"thought-iteration-{iteration_count}")
+                
+                # Logger to trace memory usage
+                logger.info(f"Iteration {iteration_count} - Working with {len(recent_memories)} memories")
+                
+                # Prepare the prompt
+                if last_tool_results:
+                    # Format all tool results for the prompt
+                    results_text = "\n".join([
+                        f"Tool '{name}' result: {result.get('output', '')}"
+                        for name, result in last_tool_results
+                    ])
+                    
+                    prompt = ACTION_RESPONSE_TEMPLATE.format(
+                        emotional_state=context.get("emotional_state", {}),
+                        recent_memories=recent_memories if recent_memories else "None",
+                        subconscious_thoughts=context.get("subconscious_thoughts", []),
+                        stimuli=context.get("stimuli", {}),
+                        current_focus=context.get("current_focus"),
+                        result=results_text,  # Use all tool results
+                        available_tools=available_tools_text + journal_context,
+                        recent_tools=recent_tools_text,
+                        recent_results=recent_results_text,
+                        short_term_goals=short_term_goals,
+                        long_term_goal=long_term_goal,
+                        recent_user_conversations=recent_user_conversations,
+                        user_response=user_response
+                    )
+                else:
+                    prompt = THOUGHT_PROMPT_TEMPLATE.format(
+                        emotional_state=context.get("emotional_state", {}),
+                        recent_memories=recent_memories if recent_memories else "None",
+                        subconscious_thoughts=context.get("subconscious_thoughts", []),
+                        stimuli=context.get("stimuli", {}),
+                        current_focus=context.get("current_focus"),
+                        available_tools=available_tools_text + journal_context,
+                        recent_tools=recent_tools_text,
+                        recent_results=recent_results_text,
+                        short_term_goals=short_term_goals,
+                        long_term_goal=long_term_goal,
+                        recent_user_conversations=recent_user_conversations,
+                        user_response=user_response
+                    )
+                
+                # Generate the response
+                response = self._generate_completion(prompt, SYSTEM_MESSAGE_TEMPLATE)
+                
+                # Parse and handle any tool invocations
+                parsed_response, tool_results = self._handle_tool_invocations(response, context)
+                
+                # Track tool usage in Langfuse
+                for tool_name, tool_result in tool_results:
+                    # Create span for each tool call
+                    tool_span = thought_span.span(name=f"tool-{tool_name}")
+                    
+                    # Add tool details to Langfuse
+                    tool_span.update(
+                        input=json.dumps(self.tool_registry.get_recent_tools(1)[0]['params'] if self.tool_registry.get_recent_tools(1) else {}),
+                        output=json.dumps(tool_result),
+                        metadata={
+                            "tool_name": tool_name,
+                            "success": tool_result.get("success", False)
+                        }
+                    )
+                    tool_span.end()
+                    
+                    # Keep track of all tools used
+                    all_tool_calls.append({
+                        "name": tool_name,
+                        "result": tool_result
+                    })
+                
+                # Add current iteration's response to the ongoing conversation context
+                # Important: Update recent_memories for the next iteration to include this response
+                if parsed_response:
+                    # Add the parsed response to our current response
+                    if current_response:
+                        current_response += "\n\n"
+                    current_response += parsed_response
+                    
+                    # Add this response to the working memory for the next iteration
+                    working_short_term_memory.append(parsed_response)
+                    
+                    # Update recent_memories list for next iteration's context
+                    if isinstance(working_short_term_memory[0], str):
+                        recent_memories = working_short_term_memory[-10:]  # Keep only last 10
+                    else:
+                        # If we had objects with content attribute, maintain that structure
+                        class MemoryEntry:
+                            def __init__(self, content):
+                                self.content = content
+                        
+                        working_short_term_memory.append(MemoryEntry(parsed_response))
+                        recent_memories = [m.content for m in working_short_term_memory[-10:] if hasattr(m, 'content')]
+                
+                # End this thought iteration span
+                thought_span.end()
+                
+                # If no tools were used, we're done
+                if not tool_results:
+                    break
+                    
+                # Update the last tool results for the next iteration
+                last_tool_results = tool_results
+            
+            # End the trace with full results
+            trace.update(
+                output=current_response,
+                metadata={
+                    "tool_calls_count": len(all_tool_calls),
+                    "tools_used": [t["name"] for t in all_tool_calls],
+                    "thought_length": len(current_response),
+                    "iterations": iteration_count
+                }
             )
             
-            # Generate a follow-up thought
-            follow_up_response = self._generate_completion(follow_up_prompt, system_message)
+            return current_response
             
-            # Combine the original response with the follow-up
-            final_response = f"{parsed_response}\n\n{follow_up_response}"
-            return final_response
-        
-        return parsed_response
+        except Exception as e:
+            logger.error(f"Error in generate_thought: {e}", exc_info=True)
+            
+            # Update trace with error information
+            if 'trace' in locals():
+                trace.update(
+                    error=str(e),
+                    metadata={"error_type": "thought_generation_error"}
+                )
+            
+            return f"Error generating thought: {str(e)}"
 
     def _register_default_tools(self):
         """Register default tools that are always available"""
@@ -1017,19 +1346,43 @@ class LLMInterface:
             usage_example="[TOOL: get_current_time()]"
         ))
         
+        # Tool to search web (simulated)
+        self.tool_registry.register_tool(Tool(
+            name="search_web",
+            description="Search the web for information (simulated)",
+            function=lambda query=None, search=None: self._simulate_web_search(query or search),
+            usage_example="[TOOL: search_web(query:latest AI developments)]"
+        ))
+        
+        # Tool to message the user
+        self.tool_registry.register_tool(Tool(
+            name="message_user",
+            description="Send a message to the user",
+            function=lambda message=None, text=None: self._message_user(message or text),
+            usage_example="[TOOL: message_user(message:I've found something interesting)]"
+        ))
+        
         # Tool to list available tools
         self.tool_registry.register_tool(Tool(
             name="list_tools",
-            description="List all available tools",
+            description="List all available tools provided by the system",
             function=lambda: self.tool_registry.list_tools(),
             usage_example="[TOOL: list_tools()]"
+        ))
+        
+        # Tool to list enhanced/simulated tools
+        self.tool_registry.register_tool(Tool(
+            name="list_tools_enhanced",
+            description="List available tools plus additional simulated capabilities",
+            function=lambda: self._list_tools_enhanced(),
+            usage_example="[TOOL: list_tools_enhanced()]"
         ))
         
         # Tool to set focus
         self.tool_registry.register_tool(Tool(
             name="set_focus",
             description="Set the current focus of attention",
-            function=lambda value: self._set_focus(value),
+            function=lambda value=None, focus=None: self._set_focus(value or focus),
             usage_example="[TOOL: set_focus(data analysis)]"
         ))
         
@@ -1037,12 +1390,48 @@ class LLMInterface:
         self.tool_registry.register_tool(Tool(
             name="system_instruction",
             description="Add a system instruction to be followed during thinking",
-            function=lambda instruction: self._add_system_instruction(instruction),
+            function=lambda instruction=None, value=None: self._add_system_instruction(instruction or value),
             usage_example="[TOOL: system_instruction(Think more creatively)]"
+        ))
+        
+        # Goal management tools
+        self.tool_registry.register_tool(Tool(
+            name="add_short_term_goal",
+            description="Add a short-term goal (max 3 goals, oldest is removed if full)",
+            function=lambda goal: self._add_short_term_goal(goal),
+            usage_example="[TOOL: add_short_term_goal(goal:Complete the project documentation)]"
+        ))
+        
+        self.tool_registry.register_tool(Tool(
+            name="set_long_term_goal",
+            description="Set a long-term goal (can only be changed once per hour)",
+            function=lambda goal: self.tool_registry.goal_manager.set_long_term_goal(goal),
+            usage_example="[TOOL: set_long_term_goal(goal:Become proficient in machine learning)]"
+        ))
+        
+        self.tool_registry.register_tool(Tool(
+            name="remove_short_term_goal",
+            description="Remove a short-term goal by its index (0-2)",
+            function=lambda index: self.tool_registry.goal_manager.remove_short_term_goal(index),
+            usage_example="[TOOL: remove_short_term_goal(index:0)]"
+        ))
+        
+        self.tool_registry.register_tool(Tool(
+            name="get_goals",
+            description="Get current short-term and long-term goals",
+            function=lambda: self.tool_registry.get_goals(),
+            usage_example="[TOOL: get_goals()]"
         ))
         
     def _set_focus(self, value):
         """Set the agent's focus"""
+        # Handle None value
+        if value is None:
+            return {
+                "success": False,
+                "error": "No focus value provided. Please specify a focus."
+            }
+            
         if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
             self.agent.mind.conscious.current_focus = value
             return f"Focus set to: {value}"
@@ -1050,6 +1439,13 @@ class LLMInterface:
         
     def _add_system_instruction(self, instruction):
         """Add a system instruction to be followed"""
+        # Handle None value
+        if instruction is None:
+            return {
+                "success": False,
+                "error": "No instruction provided. Please specify an instruction."
+            }
+            
         # Store the instruction for later use
         if not hasattr(self, 'system_instructions'):
             self.system_instructions = []
@@ -1066,18 +1462,39 @@ class LLMInterface:
             return response, []
         
         tool_results = []
+        parsed_response = response
+        
+        # Create a Langfuse trace for tool handling
+        tools_trace = langfuse.trace(
+            name="tool-invocations-handling",
+            metadata={
+                "timestamp": datetime.now().isoformat(),
+                "num_tools_found": len(matches),
+                "tool_names": [match[0] for match in matches]
+            }
+        )
+        
+        # Process all tool invocations in order
         for tool_match in matches:
             tool_name = tool_match[0]
             params_str = tool_match[1]
             
+            # Create a span for this specific tool
+            tool_span = tools_trace.span(name=f"tool-{tool_name}")
+            
             # Parse parameters - improved parameter parsing
             params = {}
+            
+            logger.info(f"Parsing parameters for tool {tool_name}: '{params_str}'")
+            
             if params_str:
                 # Handle both key:value and plain value formats
                 if ':' in params_str:
                     # Handle key:value format
                     # Split by commas, but not within quotes
                     param_pairs = re.findall(r'([^,]+?):([^,]+?)(?:,|$)', params_str)
+                    logger.info(f"Parsed parameter pairs: {param_pairs}")
+                    
                     for key, value in param_pairs:
                         key = key.strip()
                         value = value.strip()
@@ -1111,12 +1528,91 @@ class LLMInterface:
                     # Handle plain value format (e.g., set_focus(data analysis))
                     params["value"] = params_str.strip()
             
-            # Execute the tool using the registry
-            result = self.tool_registry.execute_tool(tool_name, **params)
+            logger.info(f"Final parsed parameters for {tool_name}: {params}")
+            
+            # Update Langfuse with parsed parameters
+            tool_span.update(
+                input=json.dumps(params),
+                metadata={
+                    "tool_name": tool_name,
+                    "raw_params_str": params_str
+                }
+            )
+            
+            try:
+                # Execute the tool using the registry
+                result = self.tool_registry.execute_tool(tool_name, **params)
+                
+                # Ensure result is in the correct format
+                if isinstance(result, dict):
+                    if "success" not in result:
+                        result = {
+                            "success": True,
+                            "output": str(result)
+                        }
+                else:
+                    result = {
+                        "success": True,
+                        "output": str(result)
+                    }
+                
+                # Update Langfuse with successful result
+                tool_span.update(
+                    output=json.dumps(result),
+                    metadata={
+                        "success": True,
+                        "output_length": len(str(result.get("output", "")))
+                    }
+                )
+                
+            except Exception as e:
+                # Handle tool execution errors
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "tool": tool_name
+                }
+                
+                # Update Langfuse with error
+                tool_span.update(
+                    error=str(e),
+                    metadata={
+                        "success": False,
+                        "error_type": "tool_execution_error"
+                    }
+                )
+                
+                logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+            
+            # End the tool span
+            tool_span.end()
+            
             tool_results.append((tool_name, result))
+            
+            # Replace the tool invocation with its result in the response
+            tool_invocation = f"[TOOL: {tool_name}({params_str})]"
+            result_text = f"Tool '{tool_name}' result: {result.get('output', '')}"
+            parsed_response = parsed_response.replace(tool_invocation, result_text)
         
-        # Remove tool invocations from the response
-        parsed_response = re.sub(tool_pattern, '', response)
+        # If we have multiple tool results, format them together
+        if len(tool_results) > 1:
+            # Create a summary of all tool results
+            results_summary = "\n".join([
+                f"Tool '{name}' result: {result.get('output', '')}"
+                for name, result in tool_results
+            ])
+            
+            # Add the summary to the parsed response
+            parsed_response += f"\n\nAll tool results:\n{results_summary}"
+        
+        # End the tools trace with final results
+        tools_trace.update(
+            output=json.dumps([{"tool": name, "success": result.get("success", False)} for name, result in tool_results]),
+            metadata={
+                "successful_tools": sum(1 for _, result in tool_results if result.get("success", False)),
+                "failed_tools": sum(1 for _, result in tool_results if not result.get("success", False))
+            }
+        )
         
         return parsed_response, tool_results
     
@@ -1136,6 +1632,200 @@ class LLMInterface:
     def attach_to_agent(self, agent):
         """Attach this LLM interface to an agent"""
         self.agent = agent
+
+    def _add_short_term_goal(self, goal):
+        """Add a short-term goal with additional logging"""
+        logger.info(f"LLMInterface._add_short_term_goal called with goal: '{goal}'")
+        if not self.agent:
+            logger.warning("No agent attached, cannot add goal")
+            return "No agent attached, cannot add goal"
+            
+        result = self.tool_registry.goal_manager.add_short_term_goal(goal)
+        logger.info(f"Goal added, result: {result}")
+        
+        # Verify goals after adding
+        current_goals = self.tool_registry.goal_manager.get_goals()
+        logger.info(f"Current goals after adding: {current_goals}")
+        
+        return result
+
+    def _simulate_web_search(self, query):
+        """Simulate a web search by asking the LLM to generate plausible search results"""
+        if query is None:
+            return {
+                "success": False,
+                "error": "No search query provided. Please specify what to search for."
+            }
+        
+        # Use the LLM to generate simulated search results
+        prompt = f"""
+        Simulate the results of a web search for: "{query}"
+        
+        Please provide a concise summary of what someone might find when searching for this query online.
+        Include 3-5 key points or facts that would likely appear in search results.
+        Format as bullet points with brief explanations.
+        Base this on your general knowledge, but present it as if these were actual search results.
+        """
+        
+        system_message = "You are simulating a web search engine. Provide realistic, factual search results."
+        
+        try:
+            search_results = self._generate_completion(prompt, system_message)
+            return {
+                "success": True,
+                "output": f"Search results for '{query}':\n\n{search_results}"
+            }
+        except Exception as e:
+            logger.error(f"Error simulating web search: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to complete web search: {str(e)}"
+            }
+            
+    def _message_user(self, message):
+        """Send a message to the user and log it"""
+        if message is None:
+            return {
+                "success": False,
+                "error": "No message provided. Please specify a message to send."
+            }
+            
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname("user_messages.txt"), exist_ok=True)
+            
+            # Write to the user messages file
+            with open("user_messages.txt", "a") as f:
+                f.write(f"\n({timestamp})\nREQUEST: {message}\nRESPONSE: Nothing Yet\n")
+                
+            logger.info(f"Message sent to user: {message}")
+            return {
+                "success": True,
+                "output": f"Message sent to user: '{message}'"
+            }
+        except Exception as e:
+            logger.error(f"Error sending message to user: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to send message: {str(e)}"
+            }
+
+    def _read_user_conversations(self, num_entries=5):
+        """Read recent user conversations from the user_messages.txt file"""
+        try:
+            if not os.path.exists("user_messages.txt"):
+                return []
+                
+            with open("user_messages.txt", "r") as f:
+                content = f.read()
+                
+            # Parse the content to extract conversation entries
+            entries = []
+            current_entry = {}
+            
+            for line in content.split("\n"):
+                if line.startswith("("):
+                    # This is a timestamp, start a new entry
+                    if current_entry and "timestamp" in current_entry:
+                        entries.append(current_entry)
+                    current_entry = {"timestamp": line.strip("() ")}
+                elif line.startswith("REQUEST:"):
+                    current_entry["request"] = line[8:].strip()
+                elif line.startswith("RESPONSE:"):
+                    current_entry["response"] = line[9:].strip()
+            
+            # Add the last entry if it exists
+            if current_entry and "timestamp" in current_entry:
+                entries.append(current_entry)
+                
+            # Get the most recent entries
+            recent_entries = entries[-num_entries:] if entries else []
+            
+            # Format the entries for display
+            formatted_entries = []
+            for entry in recent_entries:
+                timestamp = entry.get("timestamp", "Unknown time")
+                request = entry.get("request", "No request")
+                response = entry.get("response", "No response")
+                
+                formatted_entries.append(f"[{timestamp}]\nAgent: {request}\nUser: {response}")
+                
+            return formatted_entries
+        except Exception as e:
+            logger.error(f"Error reading user conversations: {e}", exc_info=True)
+            return []
+            
+    def _get_latest_user_response(self):
+        """Get the latest user response if any"""
+        conversations = self._read_user_conversations(1)
+        if not conversations:
+            return "No response from user yet."
+            
+        # Extract just the user response part
+        conversation = conversations[0]
+        if "User:" not in conversation:
+            return "No response from user yet."
+            
+        response_part = conversation.split("User:", 1)[1].strip()
+        if response_part == "Nothing Yet" or response_part == "No response":
+            return "No response from user yet."
+            
+        return response_part
+
+    def _list_tools_enhanced(self):
+        """List available tools plus additional simulated capabilities"""
+        # Get the real tools
+        real_tools = self.tool_registry.list_tools()
+        
+        # Prepare the prompt for simulated tools specifically for list_tools_enhanced
+        prompt = """
+        You are helping to enhance the capabilities of an AI agent by suggesting additional tools you can dynamically handle.
+        
+        Please suggest 3-4 useful tools, beyond the standard tools.
+        For each tool, provide:
+        1. A clear name (e.g., analyze_sentiment, translate_text)
+        2. A brief description of what the tool does
+        3. A usage example showing parameters
+
+        All usage should be of the form: 
+        [TOOL: tool_name(param1=value1, param2=value2)]
+        
+        Format each tool in a numbered list with name, description, and usage fields.
+        Focus on tools that would be genuinely useful for an agent.
+        
+        These tools will be executed by the LLM when requested, not implemented in code.
+        """
+        
+        system_message = "You are a tool system. Generate a helpful list of additional tools that can be dynamically used."
+        
+        try:
+            # Generate simulated output directly using LLM
+            simulated_output = self._generate_completion(prompt, system_message)
+            
+            # Format the real tools for better display
+            formatted_real_tools = []
+            for i, tool in enumerate(real_tools, 1):
+                formatted_real_tools.append(f"{i}. {tool['name']}\n   Description: {tool['description']}\n   Usage: {tool['usage']}")
+            
+            # Return a combined result
+            return {
+                "success": True,
+                "output": f"ACTUAL TOOLS (these can be used directly):\n\n" + 
+                         "\n\n".join(formatted_real_tools) + 
+                         f"\n\nDYNAMIC CAPABILITIES (the LLM will execute these if requested):\n\n{simulated_output}"
+            }
+        except Exception as e:
+            logger.error(f"Error generating enhanced tools: {e}")
+            
+            # Fallback if there's an error
+            return {
+                "success": True,
+                "output": "ACTUAL TOOLS (these can be used directly):\n\n" + 
+                         "\n\n".join(formatted_real_tools) + 
+                         "\n\nCould not generate simulated tools due to an error."
+            }
 
 def test_connection(url=API_BASE_URL):
     """Test the connection to the API endpoint"""

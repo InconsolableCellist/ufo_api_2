@@ -6,6 +6,8 @@ from model import *
 import time
 import threading
 import json
+import os
+from datetime import datetime
 
 app = FastAPI(
     title="Agent Simulation API",
@@ -47,6 +49,36 @@ class LLMConfigUpdate(BaseModel):
     max_tokens: Optional[int] = Field(None, gt=0)
     model: Optional[str] = None
     system_message: Optional[str] = None
+
+class UserMessage(BaseModel):
+    message: str
+    
+def update_user_response(message):
+    """Update the most recent user message with a response"""
+    try:
+        if not os.path.exists("user_messages.txt"):
+            # TODO: Create the file if it doesn't exist with proper structure
+            # TODO: Add initialization of conversation history
+            return False
+            
+        with open("user_messages.txt", "r") as f:
+            lines = f.readlines()
+            
+        # Find the most recent message that has 'Nothing Yet' as the response
+        for i in range(len(lines) - 1, -1, -1):
+            if "RESPONSE: Nothing Yet" in lines[i]:
+                # Update the response
+                lines[i] = f"RESPONSE: {message}\n"
+                break
+                
+        # Write the updated content back
+        with open("user_messages.txt", "w") as f:
+            f.writelines(lines)
+            
+        return True
+    except Exception as e:
+        print(f"Error updating user response: {e}")
+        return False
 
 def run_simulation_loop():
     global simulation, simulation_running, simulation_results, stop_event
@@ -144,6 +176,27 @@ async def next_step():
     
     return step_result
 
+@app.post("/send_message")
+async def send_message(message: UserMessage):
+    """Send a message to the agent"""
+    if not message.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+        
+    # TODO: Improve user message handling:
+    # - Add proper conversation history tracking
+    # - Implement message ID system for tracking conversations
+    # - Add metadata for messages (timestamp, read status, etc.)
+    # - Implement proper message storage (database instead of text file)
+    # - Add emotion analysis of incoming messages to influence agent state
+    
+    # Update the most recent agent message with this user response
+    success = update_user_response(message.message)
+    
+    if not success:
+        return {"status": "warning", "message": "Updated user message but couldn't find the most recent agent request"}
+    
+    return {"status": "success", "message": "Message sent to agent"}
+
 @app.get("/summary")
 async def get_summary():
     global agent, simulation_results
@@ -226,5 +279,9 @@ async def update_llm_configuration(config_update: LLMConfigUpdate):
     update_llm_config(updates)
     return {"message": "Configuration updated", "current_config": LLM_CONFIG}
 
+# TODO: Add function to record agent messages to users
+# TODO: Add function to retrieve conversation history with pagination
+# TODO: Add function to clear conversation history
+
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8081, reload=True) 
+    uvicorn.run("api:app", host="0.0.0.0", port=8081, reload=False) 
