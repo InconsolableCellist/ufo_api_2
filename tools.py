@@ -73,14 +73,23 @@ class GoalManager:
         self.long_term_goal = None
         self.last_long_term_goal_change = None
         self.goal_change_cooldown = 3600  # 1 hour in seconds
+        self.generation_cycle = 0  # Track generations/cycles
+        
+    def increment_cycle(self):
+        """Increment the generation cycle counter"""
+        self.generation_cycle += 1
+        logger.info(f"Incremented goal cycle counter to {self.generation_cycle}")
         
     def add_short_term_goal(self, goal):
         """Add a short-term goal, maintaining max of 3"""
+        current_time = datetime.now()
         if len(self.short_term_goals) >= 3:
             self.short_term_goals.pop(0)  # Remove oldest goal
         self.short_term_goals.append({
             "goal": goal,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": current_time.isoformat(),
+            "created_at_cycle": self.generation_cycle,
+            "cycles": 0  # This will be incremented on each cycle
         })
         logger.info(f"Added short-term goal: {goal}. Current goals: {[g['goal'] for g in self.short_term_goals]}")
         return f"Added short-term goal: {goal}"
@@ -101,7 +110,9 @@ class GoalManager:
         
         self.long_term_goal = {
             "goal": goal,
-            "timestamp": current_time.isoformat()
+            "timestamp": current_time.isoformat(),
+            "created_at_cycle": self.generation_cycle,
+            "cycles": 0  # This will be incremented on each cycle
         }
         self.last_long_term_goal_change = current_time
         logger.info(f"Set long-term goal: {goal}")
@@ -110,13 +121,93 @@ class GoalManager:
             "output": f"Set new long-term goal: {goal}"
         }
         
+    def update_goal_cycles(self):
+        """Update cycle counts for all active goals"""
+        # Update short-term goals
+        for goal in self.short_term_goals:
+            # Make sure the goal has a cycles field
+            if "cycles" not in goal:
+                goal["cycles"] = 0
+                goal["created_at_cycle"] = self.generation_cycle - 1  # Assume it was created in the previous cycle
+            goal["cycles"] += 1
+            
+        # Update long-term goal
+        if self.long_term_goal:
+            # Make sure the goal has a cycles field
+            if "cycles" not in self.long_term_goal:
+                self.long_term_goal["cycles"] = 0
+                self.long_term_goal["created_at_cycle"] = self.generation_cycle - 1  # Assume it was created in the previous cycle
+            self.long_term_goal["cycles"] += 1
+            
+        logger.info(f"Updated goal cycles. Current cycle: {self.generation_cycle}")
+        
     def get_goals(self):
-        """Get current goals"""
+        """Get current goals with duration information"""
+        current_time = datetime.now()
+        
+        # Format short-term goals with duration info
+        short_term = []
+        for goal in self.short_term_goals:
+            # Calculate duration
+            goal_time = datetime.fromisoformat(goal["timestamp"])
+            duration_seconds = (current_time - goal_time).total_seconds()
+            duration_minutes = duration_seconds / 60
+            duration_hours = duration_minutes / 60
+            
+            # Format duration string
+            if duration_hours >= 1:
+                duration_str = f"{duration_hours:.1f} hours"
+            elif duration_minutes >= 1:
+                duration_str = f"{duration_minutes:.1f} minutes"
+            else:
+                duration_str = f"{duration_seconds:.1f} seconds"
+            
+            # Ensure cycles field exists
+            cycles = goal.get("cycles", 0)
+                
+            short_term.append({
+                "text": goal["goal"],
+                "cycles": cycles,
+                "duration": duration_str
+            })
+        
+        # Format long-term goal with duration info
+        long_term = None
+        if self.long_term_goal:
+            # Calculate duration
+            goal_time = datetime.fromisoformat(self.long_term_goal["timestamp"])
+            duration_seconds = (current_time - goal_time).total_seconds()
+            duration_minutes = duration_seconds / 60
+            duration_hours = duration_minutes / 60
+            duration_days = duration_hours / 24
+            
+            # Format duration string
+            if duration_days >= 1:
+                duration_str = f"{duration_days:.1f} days"
+            elif duration_hours >= 1:
+                duration_str = f"{duration_hours:.1f} hours"
+            elif duration_minutes >= 1:
+                duration_str = f"{duration_minutes:.1f} minutes"
+            else:
+                duration_str = f"{duration_seconds:.1f} seconds"
+            
+            # Ensure cycles field exists
+            cycles = self.long_term_goal.get("cycles", 0)
+                
+            long_term = {
+                "text": self.long_term_goal["goal"],
+                "cycles": cycles,
+                "duration": duration_str
+            }
+            
         goals = {
-            "short_term": [g["goal"] for g in self.short_term_goals],
-            "long_term": self.long_term_goal["goal"] if self.long_term_goal else None
+            "short_term": [g["text"] for g in short_term],
+            "long_term": long_term["text"] if long_term else None,
+            "short_term_details": short_term,
+            "long_term_details": long_term
         }
-        logger.info(f"Retrieved goals: {goals}")
+        
+        logger.info(f"Retrieved goals with duration info: {goals}")
         return goals
         
     def remove_short_term_goal(self, index):
@@ -199,7 +290,7 @@ class ToolRegistry:
         return [{"name": entry["name"], "result": entry["result"]} for entry in recent]
         
     def get_goals(self):
-        """Get current goals"""
+        """Get current goals with duration information"""
         return self.goal_manager.get_goals()
         
     def add_short_term_goal(self, goal):
@@ -214,6 +305,52 @@ class ToolRegistry:
         logger.info(f"Current goals after adding: {current_goals}")
         
         return result
+        
+    def get_goal_stats(self):
+        """Get statistics about current goals"""
+        goals = self.goal_manager.get_goals()
+        
+        # Get short-term goal details
+        short_term_stats = []
+        for goal in goals.get("short_term_details", []):
+            short_term_stats.append(f"- Goal: {goal['text']}\n  Active for: {goal['duration']} ({goal['cycles']} cycles)")
+            
+        # Get long-term goal details
+        long_term_stats = []
+        if goals.get("long_term_details"):
+            long_term = goals["long_term_details"]
+            long_term_stats.append(f"- Goal: {long_term['text']}\n  Active for: {long_term['duration']} ({long_term['cycles']} cycles)")
+        
+        # Format the output
+        output = "Goal Statistics:\n\n"
+        
+        if short_term_stats:
+            output += "Short-term goals:\n" + "\n".join(short_term_stats) + "\n\n"
+        else:
+            output += "No short-term goals set.\n\n"
+            
+        if long_term_stats:
+            output += "Long-term goal:\n" + "\n".join(long_term_stats)
+        else:
+            output += "No long-term goal set."
+            
+        return {
+            "success": True,
+            "output": output
+        }
+        
+    def increment_goal_cycles(self):
+        """Increment the goal cycles counter"""
+        # First increment the cycle counter
+        self.goal_manager.increment_cycle()
+        
+        # Then update cycle counts for all active goals
+        self.goal_manager.update_goal_cycles()
+        
+        return {
+            "success": True,
+            "output": f"Goal cycles updated. Current cycle: {self.goal_manager.generation_cycle}"
+        }
     
     def save_state(self, path=None):
         """Save the current state of tool history and goals"""
@@ -233,7 +370,8 @@ class ToolRegistry:
                 'goal_manager': {
                     'short_term_goals': self.goal_manager.short_term_goals,
                     'long_term_goal': self.goal_manager.long_term_goal,
-                    'last_long_term_goal_change': self.goal_manager.last_long_term_goal_change
+                    'last_long_term_goal_change': self.goal_manager.last_long_term_goal_change,
+                    'generation_cycle': self.goal_manager.generation_cycle
                 },
                 'llm_stats': llm_stats
             }
@@ -272,6 +410,9 @@ class ToolRegistry:
                     self.goal_manager.long_term_goal = gm_state['long_term_goal']
                 if 'last_long_term_goal_change' in gm_state:
                     self.goal_manager.last_long_term_goal_change = gm_state['last_long_term_goal_change']
+                if 'generation_cycle' in gm_state:
+                    self.goal_manager.generation_cycle = gm_state['generation_cycle']
+                    logger.info(f"Loaded goal generation cycle: {self.goal_manager.generation_cycle}")
             
             # Restore LLM stats if available
             if 'llm_stats' in state and self.llm_client:

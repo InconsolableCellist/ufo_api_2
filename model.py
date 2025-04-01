@@ -24,7 +24,7 @@ import tools
 from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific classes from tools
 
 # Import templates
-from templates import THOUGHT_PROMPT_TEMPLATE, ACTION_RESPONSE_TEMPLATE, SYSTEM_MESSAGE_TEMPLATE, TOOL_DOCUMENTATION_TEMPLATE
+from templates import THOUGHT_PROMPT_TEMPLATE, ACTION_RESPONSE_TEMPLATE, SYSTEM_MESSAGE_TEMPLATE, TOOL_DOCUMENTATION_TEMPLATE, EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
 
 # Initialize colorama
 init(autoreset=True)
@@ -501,14 +501,12 @@ class Subconscious:
 
 class Conscious:
     def __init__(self, memory, emotion_center, subconscious, llm):
-        self.memory = memory
+        self.memory = memory 
         self.emotion_center = emotion_center
         self.subconscious = subconscious
         self.llm = llm
         self.current_focus = None
-        # TODO: Add working memory as a separate component from long-term memory
-        # TODO: Implement attention mechanisms to prioritize information processing
-        # TODO: Add metacognition capabilities to reflect on own thinking
+        self.ego_thoughts = ""  # Store ego thoughts between cycles
         
     def think(self, stimuli, subconscious_thoughts, trace_id):
         # Prepare context for LLM
@@ -518,27 +516,49 @@ class Conscious:
         # - Include previous thinking steps to maintain coherence
         # - Add structured reasoning patterns for different types of problems
         context = {
-            "short_term_memory": list(self.memory.short_term),
             "emotional_state": self.emotion_center.get_state(),
+            "short_term_memory": self.memory.recall(self.emotion_center.get_state(), n=5),
             "subconscious_thoughts": subconscious_thoughts,
             "stimuli": stimuli,
-            "current_focus": self.current_focus
+            "current_focus": self.current_focus,
+            "ego_thoughts": self.ego_thoughts  # Include ego thoughts in the context
         }
         
-        # Generate thought
-        thought = self.llm.generate_thought(context)
-        self.memory.add(thought, self.emotion_center.get_state())
+        # Generate thought using LLM
+        thought_span = langfuse.span(
+            name="thought-generation", 
+            parent_id=trace_id,
+            input=json.dumps(context)
+        )
         
-        # Extract emotional implications from thought
-        emotional_implications = self._extract_emotional_implications(thought)
-        
-        # Apply emotional implications
-        for emotion, change in emotional_implications.items():
-            if emotion in self.emotion_center.emotions:
-                self.emotion_center.emotions[emotion].intensity += change
-                self.emotion_center.emotions[emotion].intensity = max(0, min(1, self.emotion_center.emotions[emotion].intensity))
-        
-        return thought
+        try:
+            # Generate thought and get new ego thoughts for next cycle
+            thought, new_ego_thoughts = self.llm.generate_thought(context)
+            self.ego_thoughts = new_ego_thoughts  # Store ego thoughts for next cycle
+            
+            # Extract emotional implications and update state
+            emotional_implications = self._extract_emotional_implications(thought)
+            if emotional_implications:
+                self.emotion_center.update(emotional_implications)
+            
+            thought_span.update(
+                output=thought,
+                metadata={
+                    "emotion_update": bool(emotional_implications),
+                    "has_ego_thoughts": bool(self.ego_thoughts)
+                }
+            )
+            
+            # Add to memory
+            self.memory.add(thought, self.emotion_center.get_state())
+            return thought
+            
+        except Exception as e:
+            thought_span.update(error=str(e))
+            logger.error(f"Error generating thought: {e}", exc_info=True)
+            return f"Error in thought process: {str(e)}"
+        finally:
+            thought_span.end()
         
     def _extract_emotional_implications(self, thought):
         """Extract emotional implications from a thought using simple keyword matching"""
@@ -666,7 +686,8 @@ class Mind:
             name="cognitive-cycle",
             metadata={
                 "timestamp": datetime.now().isoformat(),
-                "stimuli": json.dumps(stimuli) if stimuli else "{}"
+                "stimuli": json.dumps(stimuli) if stimuli else "{}",
+                "has_ego": bool(self.conscious.ego_thoughts)
             }
         )
         
@@ -704,13 +725,17 @@ class Mind:
                 "emotional_state": self.emotion_center.get_state(),
                 "subconscious_thoughts": subconscious_thoughts,
                 "conscious_thought": conscious_thought,
-                "action": action
+                "action": action,
+                "ego_thoughts": self.conscious.ego_thoughts
             }
             
             # Update the trace with the result
             trace.update(
                 output=json.dumps(result),
-                metadata={"success": True}
+                metadata={
+                    "success": True,
+                    "has_ego_thoughts": bool(self.conscious.ego_thoughts)
+                }
             )
             
             return result
@@ -1118,6 +1143,9 @@ class LLMInterface:
         )
 
         try:
+            # Get ego thoughts from previous cycle if any
+            ego_thoughts = context.get("ego_thoughts", "")
+            
             # Get original short-term memory
             orig_short_term_memory = context.get("short_term_memory", [])
             
@@ -1188,24 +1216,30 @@ class LLMInterface:
             else:
                 recent_results_text = "No recent results"
             
-            # Get current goals
+            # Get current goals with duration information
             goals = self.tool_registry.get_goals()
             logger.info(f"Retrieved goals in generate_thought: {goals}")
             
-            # Format short-term goals with bullet points and numbering
+            # Format short-term goals with bullet points, numbering and duration
             if goals["short_term"]:
                 numbered_goals = []
-                for i, goal in enumerate(goals["short_term"]):
-                    numbered_goals.append(f"[{i}] {goal}")
+                for i, goal_detail in enumerate(goals.get("short_term_details", [])):
+                    goal_text = goal_detail["text"]
+                    duration = goal_detail["duration"]
+                    cycles = goal_detail["cycles"]
+                    numbered_goals.append(f"[{i}] {goal_text} (Active for: {duration}, {cycles} cycles)")
                 short_term_goals = "\n".join(numbered_goals)
                 logger.info(f"Formatted short-term goals: {short_term_goals}")
             else:
                 short_term_goals = "No short-term goals"
                 logger.info("No short-term goals found")
                 
-            # Format long-term goal with emphasis
-            if goals["long_term"]:
-                long_term_goal = f">>> {goals['long_term']} <<<"
+            # Format long-term goal with emphasis and duration
+            if goals["long_term"] and goals.get("long_term_details"):
+                long_term_detail = goals["long_term_details"]
+                duration = long_term_detail["duration"]
+                cycles = long_term_detail["cycles"]
+                long_term_goal = f">>> {goals['long_term']} <<< (Active for: {duration}, {cycles} cycles)"
                 logger.info(f"Formatted long-term goal: {long_term_goal}")
             else:
                 long_term_goal = "No long-term goal"
@@ -1220,6 +1254,12 @@ class LLMInterface:
             
             # Add generation statistics
             generation_stats = f"You've thought {self.generation_counter} times for {self.total_thinking_time:.2f}s"
+            
+            # Format ego thoughts if there are any
+            if ego_thoughts:
+                formatted_ego_thoughts = f"Suddenly, the following thought(s) occur to you:\n{ego_thoughts}"
+            else:
+                formatted_ego_thoughts = ""
             
             # Initialize the response and tool results
             current_response = ""
@@ -1257,7 +1297,8 @@ class LLMInterface:
                         long_term_goal=long_term_goal,
                         recent_user_conversations=recent_user_conversations,
                         user_response=user_response,
-                        generation_stats=generation_stats
+                        generation_stats=generation_stats,
+                        ego_thoughts=formatted_ego_thoughts
                     )
                 else:
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
@@ -1273,7 +1314,8 @@ class LLMInterface:
                         long_term_goal=long_term_goal,
                         recent_user_conversations=recent_user_conversations,
                         user_response=user_response,
-                        generation_stats=generation_stats
+                        generation_stats=generation_stats,
+                        ego_thoughts=formatted_ego_thoughts
                     )
                 
                 # Generate the response
@@ -1337,6 +1379,16 @@ class LLMInterface:
                 # Update the last tool results for the next iteration
                 last_tool_results = tool_results
             
+            # Generate ego thoughts about this thinking cycle
+            updated_context = dict(context)
+            updated_context.update({
+                "recent_memories": recent_memories,
+                "recent_response": current_response
+            })
+            
+            new_ego_thoughts = self._generate_ego_thoughts(updated_context)
+            logger.info(f"Generated new ego thoughts: {new_ego_thoughts[:100]}...")
+            
             # End the trace with full results
             trace.update(
                 output=current_response,
@@ -1346,11 +1398,16 @@ class LLMInterface:
                     "thought_length": len(current_response),
                     "iterations": iteration_count,
                     "generation_counter": self.generation_counter,
-                    "total_thinking_time": self.total_thinking_time
+                    "total_thinking_time": self.total_thinking_time,
+                    "has_ego_thoughts": bool(new_ego_thoughts)
                 }
             )
             
-            return current_response
+            # Store the ego thoughts for the next cycle
+            if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
+                self.agent.mind.conscious.ego_thoughts = new_ego_thoughts
+            
+            return current_response, new_ego_thoughts
             
         except Exception as e:
             logger.error(f"Error in generate_thought: {e}", exc_info=True)
@@ -1362,7 +1419,7 @@ class LLMInterface:
                     metadata={"error_type": "thought_generation_error"}
                 )
             
-            return f"Error generating thought: {str(e)}"
+            return f"Error generating thought: {str(e)}", ""
 
     def _register_agent_specific_tools(self):
         """Register tools specific to this agent"""
@@ -1388,6 +1445,14 @@ class LLMInterface:
             description="Get statistics about LLM generations, including count and total thinking time",
             function=self._get_generation_stats,
             usage_example="[TOOL: get_generation_stats()]"
+        ))
+        
+        # Tool to get goal statistics
+        self.tool_registry.register_tool(Tool(
+            name="get_goal_stats",
+            description="Get statistics about current goals, including duration and cycles",
+            function=lambda: self.tool_registry.get_goal_stats(),
+            usage_example="[TOOL: get_goal_stats()]"
         ))
         
     def _set_focus(self, value):
@@ -1613,6 +1678,130 @@ class LLMInterface:
         """Attach this LLM interface to an agent"""
         self.agent = agent
 
+    def _generate_ego_thoughts(self, context):
+        """Generate ego thoughts as a higher-level perspective on the agent's state and actions"""
+        try:
+            logger.info("Generating ego thoughts...")
+            
+            # Get the templates
+            from templates import EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
+            
+            emotional_state = context.get("emotional_state", {})
+            recent_memories = context.get("recent_memories", [])
+            if isinstance(recent_memories, list) and recent_memories and hasattr(recent_memories[0], 'content'):
+                recent_memories = [m.content for m in recent_memories if hasattr(m, 'content')]
+            
+            subconscious_thoughts = context.get("subconscious_thoughts", [])
+            stimuli = context.get("stimuli", {})
+            current_focus = context.get("current_focus", "Nothing in particular")
+            
+            # Get goals with duration information
+            goals = self.tool_registry.get_goals()
+            
+            # Format short-term goals with duration
+            if goals.get("short_term_details"):
+                short_term_goals = []
+                for i, goal_detail in enumerate(goals["short_term_details"]):
+                    text = goal_detail["text"]
+                    duration = goal_detail["duration"]
+                    cycles = goal_detail["cycles"]
+                    short_term_goals.append(f"[{i}] {text} (Active for: {duration}, {cycles} cycles)")
+                short_term_goals = "\n".join(short_term_goals)
+            else:
+                short_term_goals = "No short-term goals"
+            
+            # Format long-term goal with duration
+            if goals.get("long_term_details"):
+                long_term_detail = goals["long_term_details"]
+                text = long_term_detail["text"]
+                duration = long_term_detail["duration"]
+                cycles = long_term_detail["cycles"]
+                long_term_goal = f"{text} (Active for: {duration}, {cycles} cycles)"
+            else:
+                long_term_goal = "No long-term goal"
+            
+            # Get user conversations and response
+            if hasattr(self.tool_registry, 'read_user_conversations'):
+                recent_user_conversations = "\n\n".join(self.tool_registry.read_user_conversations(5))
+                if not recent_user_conversations:
+                    recent_user_conversations = "No recent conversations with the user."
+                user_response = self.tool_registry.get_latest_user_response()
+            else:
+                recent_user_conversations = "No conversation history available."
+                user_response = "No response available."
+            
+            # Get generation stats
+            generation_stats = f"Thought {self.generation_counter} times for {self.total_thinking_time:.2f}s"
+            
+            # Get available tools
+            available_tools_docs = []
+            for i, tool_doc in enumerate(self.tool_registry.list_tools(), 1):
+                tool_text = TOOL_DOCUMENTATION_TEMPLATE.format(
+                    index=i,
+                    name=tool_doc["name"],
+                    description=tool_doc["description"],
+                    usage=tool_doc["usage"]
+                )
+                available_tools_docs.append(tool_text)
+            available_tools_text = "\n".join(available_tools_docs)
+            
+            # Get recent tool usage and results
+            recent_tools = self.tool_registry.get_recent_tools(10)
+            if recent_tools:
+                tool_entries = []
+                for tool in recent_tools:
+                    params_str = ", ".join([f"{k}:{v}" for k, v in tool['params'].items()])
+                    timestamp = datetime.fromisoformat(tool['timestamp']).strftime("%H:%M:%S")
+                    tool_entries.append(f"- {timestamp} | {tool['name']}({params_str})")
+                recent_tools_text = "\n".join(tool_entries)
+            else:
+                recent_tools_text = "No recent tool usage"
+            
+            recent_results = self.tool_registry.get_recent_results(3)
+            if recent_results:
+                results_entries = []
+                for result in recent_results:
+                    res_obj = result['result']
+                    if res_obj.get('success', False):
+                        output = res_obj.get('output', 'No output')
+                        if len(output) > 200:
+                            output = output[:200] + "..."
+                        results_entries.append(f"- {result['name']}: SUCCESS - {output}")
+                    else:
+                        error = res_obj.get('error', 'Unknown error')
+                        results_entries.append(f"- {result['name']}: FAILED - {error}")
+                recent_results_text = "\n".join(results_entries)
+            else:
+                recent_results_text = "No recent results"
+            
+            # Format the prompt with all the information
+            ego_prompt = EGO_PROMPT_TEMPLATE.format(
+                emotional_state=emotional_state,
+                recent_memories=recent_memories if recent_memories else "None",
+                subconscious_thoughts=subconscious_thoughts,
+                stimuli=stimuli,
+                current_focus=current_focus,
+                short_term_goals=short_term_goals,
+                long_term_goal=long_term_goal,
+                recent_user_conversations=recent_user_conversations,
+                user_response=user_response,
+                generation_stats=generation_stats,
+                available_tools=available_tools_text,
+                recent_tools=recent_tools_text,
+                recent_results=recent_results_text
+            )
+            
+            # Generate the ego thoughts
+            ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_PROMPT_TEMPLATE)
+            
+            # Log and return the ego thoughts
+            logger.info(f"Ego thoughts generated: {ego_thoughts[:100]}...")
+            return ego_thoughts
+            
+        except Exception as e:
+            logger.error(f"Error generating ego thoughts: {e}", exc_info=True)
+            return ""
+
 def test_connection(url=API_BASE_URL):
     """Test the connection to the API endpoint"""
     try:
@@ -1651,9 +1840,37 @@ def initialize_system():
 def handle_shutdown(signum=None, frame=None):
     """Handle shutdown signals"""
     logger.info("Shutdown signal received")
-    if 'controller' in globals():
-        controller.shutdown()
-    sys.exit(0)
+    try:
+        if 'controller' in globals():
+            controller.shutdown()
+            
+        # Force cleanup of any potentially hanging resources
+        # Close Langfuse client if it's open
+        if 'langfuse' in globals():
+            try:
+                langfuse.flush()
+            except:
+                pass
+        
+        # Clean up any OpenAI clients
+        for key, value in list(globals().items()):
+            if isinstance(value, OpenAI):
+                try:
+                    del globals()[key]
+                except:
+                    pass
+        
+        # Force garbage collection to clean up resources
+        import gc
+        gc.collect()
+        
+        logger.info("Shutdown cleanup completed, exiting now")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+    
+    # Use os._exit for a more forceful exit that doesn't wait for threads
+    import os
+    os._exit(0)
 
 # Register shutdown handlers
 signal.signal(signal.SIGINT, handle_shutdown)  # Ctrl+C
