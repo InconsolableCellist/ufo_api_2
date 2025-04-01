@@ -18,6 +18,10 @@ from colorama import Fore, Back, Style, init
 import importlib
 import re
 import telegram  # Add this for Telegram bot functionality
+import atexit
+import signal
+import tools
+from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific classes from tools
 
 # Import templates
 from templates import THOUGHT_PROMPT_TEMPLATE, ACTION_RESPONSE_TEMPLATE, SYSTEM_MESSAGE_TEMPLATE, TOOL_DOCUMENTATION_TEMPLATE
@@ -129,6 +133,7 @@ class EmotionCenter:
             'energy': Emotion('energy', decay_rate=0.02),  # Not exactly an emotion but useful
         }
         self.mood = 0.5  # Overall mood from -1 (negative) to 1 (positive)
+        self.llm_client = None
         
     def update(self, stimuli):
         # Update all emotions
@@ -506,13 +511,56 @@ class MotivationCenter:
         return max(self.tasks, key=lambda t: t.priority)
 
 class Mind:
-    def __init__(self, llm, memory_path=None):
+    def __init__(self, llm, memory_path=None, emotion_path=None):
         self.memory = Memory(persist_path=memory_path)
         self.emotion_center = EmotionCenter()
+        self.emotion_center.llm_client = llm
         self.subconscious = Subconscious(self.memory, self.emotion_center)
         self.conscious = Conscious(self.memory, self.emotion_center, self.subconscious, llm)
         self.motivation_center = MotivationCenter()
         
+        # Load emotional state if path is provided
+        if emotion_path and os.path.exists(emotion_path):
+            self.load_emotional_state(emotion_path)
+    
+    def save_emotional_state(self, path):
+        """Save the current emotional state to disk"""
+        try:
+            emotional_data = {
+                'emotions': {name: emotion.intensity for name, emotion in self.emotion_center.emotions.items()},
+                'mood': self.emotion_center.mood
+            }
+            
+            with open(path, 'wb') as f:
+                pickle.dump(emotional_data, f)
+                
+            logger.info(f"Emotional state saved to {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving emotional state: {e}", exc_info=True)
+            return False
+    
+    def load_emotional_state(self, path):
+        """Load emotional state from disk"""
+        try:
+            with open(path, 'rb') as f:
+                emotional_data = pickle.load(f)
+                
+            # Update emotion intensities
+            for name, intensity in emotional_data.get('emotions', {}).items():
+                if name in self.emotion_center.emotions:
+                    self.emotion_center.emotions[name].intensity = intensity
+                    
+            # Update mood
+            if 'mood' in emotional_data:
+                self.emotion_center.mood = emotional_data['mood']
+                
+            logger.info(f"Emotional state loaded from {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading emotional state: {e}", exc_info=True)
+            return False
+
     def process_step(self, stimuli):
         # Create a trace for the entire thinking cycle
         trace = langfuse.trace(
@@ -572,14 +620,18 @@ class Mind:
             }
 
 class Agent:
-    def __init__(self, llm, memory_path=None, telegram_token=None, telegram_chat_id=None, journal_path="agent_journal.txt"):
+    def __init__(self, llm, memory_path=None, emotion_path=None, telegram_token=None, telegram_chat_id=None, journal_path="agent_journal.txt"):
         self.llm = llm
         self.llm.attach_to_agent(self)  # Connect the LLM to the agent
-        self.mind = Mind(self.llm, memory_path)
+        self.mind = Mind(self.llm, memory_path, emotion_path)
         self.physical_state = {
             "energy": 0.8,
             "health": 1.0
         }
+        
+        # Save paths for shutdown
+        self.memory_path = memory_path
+        self.emotion_path = emotion_path
         
         # Initialize journal and telegram bot
         self.journal = Journal(journal_path)
@@ -715,6 +767,25 @@ class Agent:
         else:
             return "Failed to write journal entry. Check logs for details."
 
+    def shutdown(self):
+        """Properly shutdown the agent, saving all states"""
+        logger.info("Agent shutdown initiated")
+        
+        # Save memory
+        if self.memory_path:
+            self.mind.memory.save()
+            logger.info(f"Memory saved to {self.memory_path}")
+            
+        # Save emotional state
+        if self.emotion_path:
+            self.mind.save_emotional_state(self.emotion_path)
+            
+        # Write final journal entry
+        self.journal.write_entry("Agent shutdown completed. Goodbye for now.")
+        
+        logger.info("Agent shutdown completed")
+        return True
+
 class SimulationController:
     def __init__(self, agent, time_step=1.0):
         self.agent = agent
@@ -747,6 +818,13 @@ class SimulationController:
                 "mental": result
             }
         }
+
+    def shutdown(self):
+        """Properly shutdown the simulation"""
+        logger.info("Simulation shutdown initiated")
+        self.agent.shutdown()
+        logger.info("Simulation shutdown completed")
+        return True
 
 class LLMInterface:
     def __init__(self, base_url=None):
@@ -830,6 +908,11 @@ class LLMInterface:
         else:
             recent_memories = [m.content for m in short_term_memory if hasattr(m, 'content')]
         
+        # Get recent journal entries if available
+        recent_journal_entries = []
+        if hasattr(self.agent, 'journal'):
+            recent_journal_entries = self.agent.journal.read_recent_entries(num_entries=3)
+        
         # Generate the available tools documentation
         available_tools_docs = []
         for i, tool_doc in enumerate(self.tool_registry.list_tools(), 1):
@@ -843,13 +926,18 @@ class LLMInterface:
         
         available_tools_text = "\n".join(available_tools_docs)
         
+        # Add journal entries to the context if available
+        journal_context = ""
+        if recent_journal_entries:
+            journal_context = "\nRecent journal entries:\n" + "\n".join(recent_journal_entries)
+        
         prompt = THOUGHT_PROMPT_TEMPLATE.format(
             emotional_state=context.get("emotional_state", {}),
             recent_memories=recent_memories if recent_memories else "None",
             subconscious_thoughts=context.get("subconscious_thoughts", []),
             stimuli=context.get("stimuli", {}),
             current_focus=context.get("current_focus"),
-            available_tools=available_tools_text
+            available_tools=available_tools_text + journal_context
         )
         
         # Use the enhanced system message
@@ -884,16 +972,34 @@ class LLMInterface:
                     result_text = str(result)
                     
                 follow_up_prompt = ACTION_RESPONSE_TEMPLATE.format(
+                    emotional_state=context.get("emotional_state", {}),
+                    recent_memories=recent_memories if recent_memories else "None",
+                    subconscious_thoughts=context.get("subconscious_thoughts", []),
+                    stimuli=context.get("stimuli", {}),
+                    current_focus=context.get("current_focus"),
                     tool_name=tool_name,
-                    result=result_text
+                    result=result_text,
+                    available_tools=available_tools_text + journal_context
                 )
                 follow_up_prompts.append(follow_up_prompt)
             
             # Combine the follow-up prompts
             combined_follow_up = "\n\n".join(follow_up_prompts)
             
+            # Generate a follow-up thought with full context
+            follow_up_prompt = ACTION_RESPONSE_TEMPLATE.format(
+                emotional_state=context.get("emotional_state", {}),
+                recent_memories=recent_memories if recent_memories else "None",
+                subconscious_thoughts=context.get("subconscious_thoughts", []),
+                stimuli=context.get("stimuli", {}),
+                current_focus=context.get("current_focus"),
+                tool_name="multiple tools",  # Since we're handling multiple tool results
+                result=combined_follow_up,   # Use the combined results
+                available_tools=available_tools_text + journal_context
+            )
+            
             # Generate a follow-up thought
-            follow_up_response = self._generate_completion(combined_follow_up, system_message)
+            follow_up_response = self._generate_completion(follow_up_prompt, system_message)
             
             # Combine the original response with the follow-up
             final_response = f"{parsed_response}\n\n{follow_up_response}"
@@ -952,7 +1058,8 @@ class LLMInterface:
     
     def _handle_tool_invocations(self, response, context):
         """Parse and handle tool invocations in the response"""
-        tool_pattern = r'\[TOOL: (\w+)\(([^)]*)\)\]'
+        # Updated regex to handle quoted parameters and more flexible formats
+        tool_pattern = r'\[TOOL:\s*(\w+)\s*\(([^)]*)\)\]'
         matches = re.findall(tool_pattern, response)
         
         if not matches:
@@ -969,32 +1076,37 @@ class LLMInterface:
                 # Handle both key:value and plain value formats
                 if ':' in params_str:
                     # Handle key:value format
-                    param_pairs = params_str.split(',')
-                    for pair in param_pairs:
-                        if ':' in pair:
-                            key, value = pair.split(':', 1)
-                            key = key.strip()
-                            value = value.strip()
-                            
-                            # Try to convert value to appropriate type
-                            try:
-                                if value.lower() == 'true':
-                                    value = True
-                                elif value.lower() == 'false':
-                                    value = False
-                                elif '.' in value:
-                                    value = float(value)
-                                else:
-                                    try:
-                                        value = int(value)
-                                    except ValueError:
-                                        # Keep as string if conversion fails
-                                        pass
-                            except (ValueError, AttributeError):
-                                # Keep as string if conversion fails
-                                pass
-                            
-                            params[key] = value
+                    # Split by commas, but not within quotes
+                    param_pairs = re.findall(r'([^,]+?):([^,]+?)(?:,|$)', params_str)
+                    for key, value in param_pairs:
+                        key = key.strip()
+                        value = value.strip()
+                        
+                        # Remove quotes if present
+                        if value.startswith('"') and value.endswith('"'):
+                            value = value[1:-1]
+                        elif value.startswith("'") and value.endswith("'"):
+                            value = value[1:-1]
+                        
+                        # Try to convert value to appropriate type
+                        try:
+                            if value.lower() == 'true':
+                                value = True
+                            elif value.lower() == 'false':
+                                value = False
+                            elif '.' in value:
+                                value = float(value)
+                            else:
+                                try:
+                                    value = int(value)
+                                except ValueError:
+                                    # Keep as string if conversion fails
+                                    pass
+                        except (ValueError, AttributeError):
+                            # Keep as string if conversion fails
+                            pass
+                        
+                        params[key] = value
                 else:
                     # Handle plain value format (e.g., set_focus(data analysis))
                     params["value"] = params_str.strip()
@@ -1060,10 +1172,35 @@ def initialize_system():
     logger.error(f"Failed to connect to API after {max_retries} attempts")
     return False
 
-# Replace the simple test_connection call with this
+def handle_shutdown(signum=None, frame=None):
+    """Handle shutdown signals"""
+    logger.info("Shutdown signal received")
+    if 'controller' in globals():
+        controller.shutdown()
+    sys.exit(0)
+
+# Register shutdown handlers
+signal.signal(signal.SIGINT, handle_shutdown)  # Ctrl+C
+signal.signal(signal.SIGTERM, handle_shutdown)  # Termination signal
+atexit.register(lambda: handle_shutdown() if 'controller' in globals() else None)
+
 if __name__ == "__main__":
     if initialize_system():
         logger.info("System initialized successfully")
+        
+        # Initialize components
+        llm = LLMInterface()
+        agent = Agent(
+            llm=llm, 
+            memory_path="agent_memory.pkl",
+            emotion_path="agent_emotions.pkl",
+            telegram_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
+            telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID")
+        )
+        controller = SimulationController(agent)
+        
+        # Run simulation or other operations
+        # ...
     else:
         logger.error("System initialization failed")
 
@@ -1078,190 +1215,3 @@ def update_llm_config(new_config):
     global LLM_CONFIG
     LLM_CONFIG.update(new_config)
     logger.info(f"LLM configuration updated: {LLM_CONFIG}")
-
-class Tool:
-    def __init__(self, name, description, function, usage_example=None):
-        self.name = name
-        self.description = description
-        self.function = function
-        self.usage_example = usage_example or f"[TOOL: {name}()]"
-        
-    def execute(self, **params):
-        """Execute the tool with the given parameters"""
-        try:
-            result = self.function(**params)
-            return {
-                "tool": self.name,
-                "success": True,
-                "output": result
-            }
-        except Exception as e:
-            logger.error(f"Error executing tool {self.name}: {e}", exc_info=True)
-            return {
-                "tool": self.name,
-                "success": False,
-                "error": str(e)
-            }
-            
-    def get_documentation(self):
-        """Return documentation for this tool"""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "usage": self.usage_example
-        }
-
-
-class ToolRegistry:
-    def __init__(self):
-        self.tools = {}
-        self.llm_client = None  # Will be set later
-        
-    def register_tool(self, tool):
-        """Register a new tool"""
-        self.tools[tool.name] = tool
-        logger.info(f"Registered tool: {tool.name}")
-        
-    def get_tool(self, name):
-        """Get a tool by name"""
-        return self.tools.get(name)
-        
-    def list_tools(self):
-        """List all available tools"""
-        return [tool.get_documentation() for tool in self.tools.values()]
-        
-    def execute_tool(self, name, **params):
-        """Execute a tool by name with parameters"""
-        tool = self.get_tool(name)
-        if tool:
-            return tool.execute(**params)
-        else:
-            # Tool not found, use LLM to suggest alternatives
-            return self._handle_unknown_tool(name, params)
-            
-    def _handle_unknown_tool(self, name, params):
-        """Handle unknown tool requests by consulting the LLM"""
-        if not self.llm_client:
-            return {
-                "tool": name,
-                "success": False,
-                "error": "Unknown tool and no LLM client available for suggestions"
-            }
-            
-        # Prepare context for the LLM
-        available_tools = self.list_tools()
-        prompt = f"""
-        The agent tried to use an unknown tool: "{name}" with parameters: {params}
-        
-        Available tools are:
-        {json.dumps(available_tools, indent=2)}
-        
-        Based on what the agent is trying to do, which available tool would be most appropriate?
-        If none are appropriate, respond with "NO_SUITABLE_TOOL".
-        
-        Format your response as:
-        TOOL_NAME: brief explanation of why this tool is appropriate
-        """
-        
-        # Use a system prompt that makes it clear this is a system function, not agent thought
-        system_message = "You are a helpful assistant that suggests appropriate tools for an AI agent. Respond only with the tool name and brief explanation."
-        
-        try:
-            response = self.llm_client._generate_completion(prompt, system_message)
-            
-            # Parse the response to extract tool name
-            if "NO_SUITABLE_TOOL" in response:
-                return {
-                    "tool": name,
-                    "success": False,
-                    "error": f"No suitable tool found for '{name}'. Available tools: {', '.join([t['name'] for t in available_tools])}"
-                }
-                
-            # Try to extract a tool name from the response
-            suggested_tool_name = response.split(":", 1)[0].strip()
-            if suggested_tool_name in self.tools:
-                logger.info(f"Suggested alternative tool: {suggested_tool_name} for unknown tool: {name}")
-                return {
-                    "tool": name,
-                    "success": False,
-                    "error": f"Unknown tool: {name}. Did you mean '{suggested_tool_name}'?",
-                    "suggestion": suggested_tool_name
-                }
-            
-            return {
-                "tool": name,
-                "success": False,
-                "error": f"Unknown tool: {name}. Available tools: {', '.join([t['name'] for t in available_tools])}"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error suggesting alternative tool: {e}", exc_info=True)
-            return {
-                "tool": name,
-                "success": False,
-                "error": f"Unknown tool: {name}"
-            }
-
-class Journal:
-    def __init__(self, file_path="agent_journal.txt"):
-        self.file_path = file_path
-        # Create the file if it doesn't exist
-        if not os.path.exists(file_path):
-            with open(file_path, 'w') as f:
-                f.write("# Agent Journal\n\n")
-            logger.info(f"Created new journal file at {file_path}")
-    
-    def write_entry(self, entry):
-        """Write a new entry to the journal with timestamp"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        formatted_entry = f"\n## {timestamp}\n{entry}\n"
-        
-        try:
-            with open(self.file_path, 'a') as f:
-                f.write(formatted_entry)
-            logger.info(f"Journal entry written: {entry[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to write journal entry: {e}")
-            return False
-
-class TelegramBot:
-    def __init__(self, token=None, chat_id=None):
-        self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
-        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-        self.bot = None
-        self.last_message_time = None  # Track when the last message was sent
-        self.rate_limit_seconds = 3600  # 1 hour in seconds
-        
-        if self.token:
-            try:
-                self.bot = telegram.Bot(token=self.token)
-                logger.info("Telegram bot initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize Telegram bot: {e}")
-        else:
-            logger.warning("Telegram bot token not provided. Messaging will be disabled.")
-    
-    def send_message(self, message):
-        """Send a message to the configured chat ID with rate limiting"""
-        if not self.bot or not self.chat_id:
-            logger.warning("Telegram bot not configured properly. Message not sent.")
-            return False
-        
-        # Check rate limit
-        current_time = datetime.now()
-        if self.last_message_time:
-            time_since_last = (current_time - self.last_message_time).total_seconds()
-            if time_since_last < self.rate_limit_seconds:
-                time_remaining = self.rate_limit_seconds - time_since_last
-                logger.warning(f"Rate limit exceeded. Cannot send message. Try again in {time_remaining:.1f} seconds.")
-                return False
-        
-        try:
-            self.bot.send_message(chat_id=self.chat_id, text=message)
-            self.last_message_time = current_time  # Update the last message time
-            logger.info(f"Telegram message sent: {message[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
-            return False

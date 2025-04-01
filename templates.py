@@ -15,10 +15,19 @@ Based on this context, what are my current thoughts? Include up to one (and only
 
 # Template for action responses
 ACTION_RESPONSE_TEMPLATE = """
-You just used the tool: {tool_name}
-Result: {result}
+Current emotional state: {emotional_state}
+Recent memories: {recent_memories}
+Subconscious thoughts: {subconscious_thoughts}
+Current stimuli: {stimuli}
+Current focus: {current_focus}
 
-How you feel to this (if any) is up to you.
+Previous tool actions and their results:
+{result}
+
+You can use the following tools by writing [TOOL: tool_name(parameters)] at the end of your response:
+{available_tools}
+
+Based on this context and the results of your previous actions, what are your thoughts? Include up to one (and only one) tool invocation as needed.
 """
 
 # Template for system message
