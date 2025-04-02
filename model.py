@@ -24,7 +24,7 @@ import tools
 from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific classes from tools
 
 # Import templates
-from templates import THOUGHT_PROMPT_TEMPLATE, ACTION_RESPONSE_TEMPLATE, SYSTEM_MESSAGE_TEMPLATE, TOOL_DOCUMENTATION_TEMPLATE, EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
+from templates import THOUGHT_PROMPT_TEMPLATE, AGENT_SYSTEM_INSTRUCTIONS, EGO_SYSTEM_INSTRUCTIONS, TOOL_DOCUMENTATION_TEMPLATE
 
 # Global variables
 USER_ANNOUNCEMENT = None  # Will store special announcements from the user
@@ -1496,7 +1496,7 @@ class LLMInterface:
                     # Store the ego thoughts for the next cycle
                     if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
                         self.agent.mind.conscious.ego_thoughts = intermediate_ego_thoughts
-                
+
                 # Prepare the prompt
                 if last_tool_results:
                     # Format all tool results for the prompt
@@ -1505,13 +1505,12 @@ class LLMInterface:
                         for name, result in last_tool_results
                     ])
                     
-                    prompt = ACTION_RESPONSE_TEMPLATE.format(
+                    prompt = THOUGHT_PROMPT_TEMPLATE.format(
                         emotional_state=context.get("emotional_state", {}),
                         recent_memories=recent_memories if recent_memories else "None",
                         subconscious_thoughts=context.get("subconscious_thoughts", []),
                         stimuli=context.get("stimuli", {}),
                         current_focus=context.get("current_focus"),
-                        result=results_text,  # Use all tool results
                         available_tools=available_tools_text + journal_context,
                         recent_tools=recent_tools_text,
                         recent_results=recent_results_text,
@@ -1543,7 +1542,7 @@ class LLMInterface:
                     )
                 
                 # Generate the response
-                response = self._generate_completion(prompt, SYSTEM_MESSAGE_TEMPLATE)
+                response = self._generate_completion(prompt, AGENT_SYSTEM_INSTRUCTIONS)
                 
                 # Parse and handle any tool invocations
                 parsed_response, tool_results = self._handle_tool_invocations(response, context)
@@ -1963,7 +1962,7 @@ class LLMInterface:
             logger.info("Generating ego thoughts...")
             
             # Get the templates
-            from templates import EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
+            from templates import EGO_SYSTEM_INSTRUCTIONS, THOUGHT_PROMPT_TEMPLATE
             
             # Check for previous ego thoughts
             previous_ego_thoughts = context.get("previous_ego_thoughts", "")
@@ -2085,7 +2084,7 @@ class LLMInterface:
                 recent_memories.append(f"[MOST RECENT THOUGHT]: {recent_response}")
             
             # Format the prompt with all the information
-            ego_prompt = EGO_PROMPT_TEMPLATE.format(
+            ego_prompt = THOUGHT_PROMPT_TEMPLATE.format(
                 emotional_state=emotional_state,
                 recent_memories=recent_memories if recent_memories else "None",
                 subconscious_thoughts=subconscious_thoughts,
@@ -2098,7 +2097,9 @@ class LLMInterface:
                 generation_stats=generation_stats,
                 available_tools=available_tools_text,
                 recent_tools=recent_tools_text,
-                recent_results=recent_results_text
+                recent_results=recent_results_text,
+                ego_thoughts="",
+                user_announcement=""  # Empty string for ego to omit announcements
             )
             
             # If we have previous ego thoughts, add them to the prompt
@@ -2106,7 +2107,7 @@ class LLMInterface:
                 ego_prompt += f"\n\nYour previous ego thoughts were:\n{previous_ego_thoughts}\n\nConsider these thoughts as you develop new insights, but don't repeat them exactly."
             
             # Generate the ego thoughts
-            ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_PROMPT_TEMPLATE)
+            ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_INSTRUCTIONS)
             
             # Log and return the ego thoughts
             logger.info(f"Ego thoughts generated: {ego_thoughts[:100]}...")
