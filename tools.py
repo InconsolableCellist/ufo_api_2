@@ -69,11 +69,12 @@ class Tool:
 
 class GoalManager:
     def __init__(self):
-        self.short_term_goals = []  # Max 3 goals
+        self.short_term_goals = []  # Max 10 goals
         self.long_term_goal = None
         self.last_long_term_goal_change = None
         self.goal_change_cooldown = 3600  # 1 hour in seconds
         self.generation_cycle = 0  # Track generations/cycles
+        self.max_short_term_goals = 10  # Maximum number of short-term goals allowed
         
     def increment_cycle(self):
         """Increment the generation cycle counter"""
@@ -81,10 +82,19 @@ class GoalManager:
         logger.info(f"Incremented goal cycle counter to {self.generation_cycle}")
         
     def add_short_term_goal(self, goal):
-        """Add a short-term goal, maintaining max of 3"""
+        """Add a short-term goal, with a maximum of 10 goals"""
         current_time = datetime.now()
-        if len(self.short_term_goals) >= 3:
-            self.short_term_goals.pop(0)  # Remove oldest goal
+        
+        # Check if we've reached the maximum number of goals
+        if len(self.short_term_goals) >= self.max_short_term_goals:
+            error_msg = f"Maximum number of short-term goals ({self.max_short_term_goals}) reached. Please remove a goal before adding another."
+            logger.warning(error_msg)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+            
+        # Add the new goal
         self.short_term_goals.append({
             "goal": goal,
             "timestamp": current_time.isoformat(),
@@ -92,7 +102,10 @@ class GoalManager:
             "cycles": 0  # This will be incremented on each cycle
         })
         logger.info(f"Added short-term goal: {goal}. Current goals: {[g['goal'] for g in self.short_term_goals]}")
-        return f"Added short-term goal: {goal}"
+        return {
+            "success": True,
+            "output": f"Added short-term goal: {goal}"
+        }
         
     def set_long_term_goal(self, goal):
         """Set a long-term goal with cooldown"""
@@ -304,6 +317,7 @@ class ToolRegistry:
         current_goals = self.goal_manager.get_goals()
         logger.info(f"Current goals after adding: {current_goals}")
         
+        # Return the result directly (now it's a dict with success/error fields)
         return result
         
     def get_goal_stats(self):
@@ -712,7 +726,7 @@ class ToolRegistry:
         # Goal management tools
         self.register_tool(Tool(
             name="add_short_term_goal",
-            description="Add a short-term goal (max 3 goals, oldest is removed if full)",
+            description="Add a short-term goal (max 10 goals, returns error when limit reached)",
             function=lambda goal: self.add_short_term_goal(goal),
             usage_example="[TOOL: add_short_term_goal(goal:Complete the project documentation)]"
         ))
@@ -726,9 +740,9 @@ class ToolRegistry:
         
         self.register_tool(Tool(
             name="remove_short_term_goal",
-            description="Remove a short-term goal by its index (0-2)",
+            description="Remove a short-term goal by its index (0-9)",
             function=lambda index: self.goal_manager.remove_short_term_goal(index),
-            usage_example="[TOOL: remove_short_term_goal(index:0)]"
+            usage_example="[TOOL: remove_short_term_goal(index:5)]"
         ))
         
         self.register_tool(Tool(

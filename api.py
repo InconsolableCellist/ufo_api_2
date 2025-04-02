@@ -53,6 +53,9 @@ class LLMConfigUpdate(BaseModel):
 class UserMessage(BaseModel):
     message: str
     
+class UserAnnouncement(BaseModel):
+    announcement: str
+
 def update_user_response(message):
     """Update the most recent user message with a response"""
     try:
@@ -196,6 +199,20 @@ async def send_message(message: UserMessage):
         return {"status": "warning", "message": "Updated user message but couldn't find the most recent agent request"}
     
     return {"status": "success", "message": "Message sent to agent"}
+
+@app.post("/send_announcement")
+async def send_announcement(announcement: UserAnnouncement):
+    """Send a special announcement that will appear as a mysterious voice in the agent's mind"""
+    if not announcement.announcement.strip():
+        raise HTTPException(status_code=400, detail="Announcement cannot be empty")
+        
+    # Import the module to modify its global variable
+    import model
+    
+    # Set the global announcement
+    model.USER_ANNOUNCEMENT = announcement.announcement
+    
+    return {"status": "success", "message": "Announcement set. It will appear in the next message to the LLM."}
 
 @app.get("/summary")
 async def get_summary():

@@ -26,6 +26,9 @@ from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific cl
 # Import templates
 from templates import THOUGHT_PROMPT_TEMPLATE, ACTION_RESPONSE_TEMPLATE, SYSTEM_MESSAGE_TEMPLATE, TOOL_DOCUMENTATION_TEMPLATE, EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
 
+# Global variables
+USER_ANNOUNCEMENT = None  # Will store special announcements from the user
+
 # Initialize colorama
 init(autoreset=True)
 
@@ -136,7 +139,9 @@ class EmotionCenter:
             'fear': Emotion('fear', intensity=0.1, decay_rate=0.1),
             'surprise': Emotion('surprise', intensity=0.2, decay_rate=0.15),
             'disgust': Emotion('disgust', intensity=0.05, decay_rate=0.07),
-            'energy': Emotion('energy', intensity=0.4, decay_rate=0.02),  # Start with some energy
+            'energy': Emotion('energy', intensity=0.4, decay_rate=0.02),
+            'focus': Emotion('focus', intensity=0.5, decay_rate=0.03),  
+            'curiosity': Emotion('curiosity', intensity=0.2, decay_rate=0.05),
         }
         self.mood = 0.5  # Overall mood from -1 (negative) to 1 (positive)
         self.llm_client = None
@@ -156,7 +161,7 @@ class EmotionCenter:
         # - Consider personality baseline
         # - Add time-weighted averaging (recent emotions matter more)
         # - Implement emotional "momentum"
-        positive = self.emotions['happiness'].intensity + self.emotions['surprise'].intensity * 0.5
+        positive = self.emotions['happiness'].intensity + self.emotions['surprise'].intensity * 0.5 + self.emotions['focus'].intensity * 0.3 + self.emotions['curiosity'].intensity * 0.2
         negative = self.emotions['sadness'].intensity + self.emotions['anger'].intensity + self.emotions['fear'].intensity
         self.mood = (positive - negative) / (positive + negative + 1e-6)  # Avoid division by zero
         
@@ -352,7 +357,7 @@ class Memory:
             
         # If query is provided, use it for semantic search
         if query:
-            logger.info(f"Recalling memories with query: '{query}'")
+            logger.info(f"Recalling memories with query: '{query[:50]}...' (thought-based recall)")
             query_embedding = self.get_embedding(query)
             faiss.normalize_L2(query_embedding.reshape(1, -1))
             
@@ -361,7 +366,7 @@ class Memory:
             
             logger.info(f"FAISS search results - indices: {indices[0]}, distances: {distances[0]}")
             memories = [self.long_term[idx] for idx in indices[0]]
-            logger.info(f"Retrieved {len(memories)} memories via semantic search")
+            logger.info(f"Retrieved {len(memories)} memories via thought-based semantic search")
         else:
             # Filter memories based on emotional state
             # TODO: Implement more sophisticated emotional memory retrieval:
@@ -369,7 +374,7 @@ class Memory:
             # - Add weighting for memory importance/intensity
             # - Implement primacy/recency effects
             # - Consider retrieval based on emotional contrast, not just similarity
-            logger.info(f"Recalling memories based on emotional state: {emotional_state}")
+            logger.info(f"Recalling memories based on emotional state: {emotional_state} (emotional recall)")
             relevant = [mem for mem, ctx in self.associations.items() 
                        if self._emotional_match(ctx, emotional_state)]
             logger.info(f"Found {len(relevant)} emotionally relevant memories")
@@ -396,14 +401,52 @@ class Memory:
         # - Add "emotional opposites" matching for contrast recall
         # - Implement emotional context modeling
         
-        # More sophisticated matching using mood and dominant emotions
-        if 'mood' in memory_emotion and 'mood' in current_emotion:
-            return abs(memory_emotion['mood'] - current_emotion['mood']) < 0.3
+        # Extract primary emotion keys to check
+        emotion_keys = ['happiness', 'sadness', 'anger', 'fear', 'surprise', 'disgust', 'energy', 'focus', 'curiosity']
         
-        # Fallback to simple matching
+        # If both have mood, use it as a primary match factor
+        if 'mood' in memory_emotion and 'mood' in current_emotion:
+            # Mood match is a continuous value between 0 (no match) and 1 (perfect match)
+            mood_similarity = 1.0 - abs(memory_emotion['mood'] - current_emotion['mood'])
+            
+            # If moods are highly similar (within 30% range), it's a match
+            if mood_similarity > 0.7:
+                logger.info(f"Mood match: {mood_similarity:.2f} - Memory mood: {memory_emotion['mood']:.2f}, Current mood: {current_emotion['mood']:.2f}")
+                return True
+                
+        # Check for strong emotions in both memory and current state
+        # A match exists if the same emotion is strong (>0.6) in both states
+        matched_emotions = []
+        for emotion in emotion_keys:
+            memory_intensity = memory_emotion.get(emotion, 0)
+            current_intensity = current_emotion.get(emotion, 0)
+            
+            # Match if both have the emotion with significant intensity
+            if memory_intensity > 0.6 and current_intensity > 0.6:
+                matched_emotions.append(emotion)
+                
+        if matched_emotions:
+            logger.info(f"Emotional match found on: {matched_emotions}")
+            return True
+            
+        # Also match when we have emotional contrast (strong opposite emotions)
+        # This is useful for finding memories with emotional contrast
+        opposing_pairs = [
+            ('happiness', 'sadness'),
+            ('anger', 'fear')
+        ]
+        
+        for emotion1, emotion2 in opposing_pairs:
+            # Check if one emotion is strong in memory and its opposite is strong in current
+            if (memory_emotion.get(emotion1, 0) > 0.7 and current_emotion.get(emotion2, 0) > 0.7) or \
+               (memory_emotion.get(emotion2, 0) > 0.7 and current_emotion.get(emotion1, 0) > 0.7):
+                logger.info(f"Emotional contrast match between {emotion1} and {emotion2}")
+                return True
+        
+        # Fallback to simple matching (legacy code)
         return any(memory_emotion.get(e, 0) > 0.5 and current_emotion.get(e, 0) > 0.5 
                   for e in ['happiness', 'sadness', 'anger', 'fear'])
-                  
+        
     def save(self):
         """Save memory state to disk"""
         if not self.persist_path:
@@ -453,12 +496,27 @@ class Subconscious:
             self._generate_random_thoughts,
             self._process_emotions
         ]
+        self.last_thought = None  # Track the most recent thought
         
     def process(self, trace_id):
         thoughts = []
         for process in self.background_processes:
             thoughts.extend(process(trace_id))
         return thoughts
+        
+    def set_focus_thought(self, thought):
+        """Explicitly set a thought for the subconscious to focus on"""
+        if thought:
+            logger.info(f"Explicitly setting subconscious focus thought: '{thought[:50]}...'")
+            self.last_thought = thought
+            return True
+        return False
+        
+    def find_related_memories(self, thought_query, n=3):
+        """Find memories related to a specific thought query"""
+        logger.info(f"Finding memories related to specific thought: '{thought_query[:50]}...'")
+        emotional_state = self.emotion_center.get_state()
+        return self.memory.recall(emotional_state, query=thought_query, n=n)
         
     def _surface_memories(self, trace_id):
         # TODO: Improve memory surfacing algorithm to consider more factors:
@@ -467,7 +525,26 @@ class Subconscious:
         # - Recency vs importance balance
         # - Associative connections between memories
         emotional_state = self.emotion_center.get_state()
-        return self.memory.recall(emotional_state)
+        
+        # If we have a recent thought, use it as a query to find related memories
+        if self.last_thought:
+            logger.info(f"Recalling memories related to recent thought: '{self.last_thought[:50]}...'")
+            # Get memories related to the recent thought (semantic search)
+            thought_related_memories = self.memory.recall(emotional_state, query=self.last_thought, n=2)
+            
+            # Also get emotionally relevant memories
+            emotional_memories = self.memory.recall(emotional_state, n=1)
+            
+            # Combine both (avoiding duplicates)
+            all_memories = thought_related_memories
+            for mem in emotional_memories:
+                if mem not in all_memories:
+                    all_memories.append(mem)
+                    
+            return all_memories
+        else:
+            # Fallback to emotional state only if no recent thought
+            return self.memory.recall(emotional_state)
         
     def _generate_random_thoughts(self, trace_id):
         # Simple random thought generation
@@ -491,6 +568,8 @@ class Subconscious:
             return ["I'm feeling really angry about this"]
         elif emotions['happiness'] > 0.7:
             return ["I'm feeling really happy right now"]
+        elif emotions['focus'] > 0.7:
+            return ["I'm in a state of deep concentration right now, with heightened mental clarity"]
         return []
         
     # TODO: Implement new subconscious processes:
@@ -551,6 +630,12 @@ class Conscious:
             
             # Add to memory
             self.memory.add(thought, self.emotion_center.get_state())
+            
+            # Update the subconscious with the most recent thought
+            # This will be used for retrieving related memories in the next cycle
+            self.subconscious.last_thought = thought
+            logger.info(f"Updated subconscious with last thought: '{thought[:50]}...'")
+            
             return thought
             
         except Exception as e:
@@ -839,6 +924,22 @@ class Agent:
             usage_example="[TOOL: recall_memories(query:happiness, count:3)]"
         ))
         
+        # Tool to find memories related to a specific thought
+        self.llm.tool_registry.register_tool(Tool(
+            name="find_related_memories",
+            description="Find memories related to a specific thought or concept",
+            function=lambda thought=None, count=3: self._find_related_memories(thought, count),
+            usage_example="[TOOL: find_related_memories(thought:artificial intelligence, count:3)]"
+        ))
+        
+        # Tool to set subconscious focus
+        self.llm.tool_registry.register_tool(Tool(
+            name="set_subconscious_focus",
+            description="Set a thought for the subconscious to focus on when finding related memories",
+            function=lambda thought: self._set_subconscious_focus(thought),
+            usage_example="[TOOL: set_subconscious_focus(thought:I want to understand more about machine learning)]"
+        ))
+        
         # Tool to get current emotional state
         self.llm.tool_registry.register_tool(Tool(
             name="get_emotional_state",
@@ -857,8 +958,8 @@ class Agent:
         self.llm.tool_registry.register_tool(Tool(
             name="write_journal",
             description="Write an entry to the agent's journal for future reference",
-            function=lambda entry: self._write_journal_entry(entry),
-            usage_example="[TOOL: write_journal(entry:Today I learned something interesting)]"
+            function=lambda entry=None, text=None, message=None, value=None: self._write_journal_entry(entry or text or message or value),
+            usage_example="[TOOL: write_journal(entry:Today I learned something interesting)] or [TOOL: write_journal(entry=\"My journal entry with quotes\")] or [TOOL: write_journal(text:Another format example)] (for the love of God why can't you consistently call this properly?)"
         ))
         
     def _adjust_emotion(self, emotion, change):
@@ -878,14 +979,54 @@ class Agent:
         return f"Rested and recovered {amount:.2f} energy. Current energy: {self.physical_state['energy']:.2f}"
         
     def _recall_memories(self, query, count):
-        """Recall memories"""
+        """Recall memories based on query or emotional state"""
         count = int(count)
-        memories = self.mind.memory.recall(
-            emotional_state=self.mind.emotion_center.get_state(),
-            query=query,
-            n=count
-        )
+        
+        # If a query is provided, use semantic search
+        if query:
+            logger.info(f"Recalling memories with direct query: {query}")
+            memories = self.mind.memory.recall(
+                emotional_state=self.mind.emotion_center.get_state(),
+                query=query,
+                n=count
+            )
+        else:
+            # If no query, fall back to emotional state only
+            logger.info("Recalling memories based on emotional state only")
+            memories = self.mind.memory.recall(
+                emotional_state=self.mind.emotion_center.get_state(),
+                n=count
+            )
+            
         return memories
+        
+    def _find_related_memories(self, thought, count):
+        """Find memories related to a specific thought using the subconscious"""
+        if not thought:
+            return "A thought query must be provided"
+            
+        count = int(count)
+        logger.info(f"Finding memories related to thought: '{thought}'")
+        
+        # Use the subconscious to find related memories
+        memories = self.mind.subconscious.find_related_memories(thought, count)
+        
+        if not memories:
+            return "No related memories found"
+            
+        return memories
+        
+    def _set_subconscious_focus(self, thought):
+        """Set a thought for the subconscious to focus on"""
+        if not thought:
+            return "A thought must be provided to focus on"
+            
+        success = self.mind.subconscious.set_focus_thought(thought)
+        
+        if success:
+            return f"Subconscious now focusing on: '{thought[:50]}...'"
+        else:
+            return "Failed to set subconscious focus"
 
     def _send_telegram_message(self, message):
         """Send a message via Telegram"""
@@ -898,13 +1039,59 @@ class Agent:
         else:
             return "Failed to send message. Check logs for details."
 
-    def _write_journal_entry(self, entry):
+    def _write_journal_entry(self, entry=None, value=None):
         """Write an entry to the journal"""
-        success = self.journal.write_entry(entry)
-        if success:
-            return f"Journal entry recorded: '{entry[:50]}...'" if len(entry) > 50 else f"Journal entry recorded: '{entry}'"
-        else:
-            return "Failed to write journal entry. Check logs for details."
+        try:
+            # Use entry or value parameter, whichever is provided
+            content = entry if entry is not None else value
+            
+            # Handle various input formats that might be passed in by the LLM
+            if content is None:
+                content = "Empty journal entry"
+                
+            # Handle cases where entry is passed with quotes
+            if isinstance(content, str):
+                # Remove surrounding quotes if they exist
+                if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
+                    content = content[1:-1]
+            
+            # Convert non-string entries to string
+            if not isinstance(content, str):
+                content = str(content)
+                
+            # Log the entry type and content for debugging
+            logger.info(f"Writing journal entry of type {type(content)}: '{content[:50]}...'")
+            
+            # Ensure we have an entry
+            if not content.strip():
+                content = "Blank journal entry recorded at this timestamp"
+                
+            # Write the entry
+            success = self.journal.write_entry(content)
+            
+            if success:
+                return f"Journal entry recorded: '{content[:50]}...'" if len(content) > 50 else f"Journal entry recorded: '{content}'"
+            else:
+                # If writing failed, try once more with a simplified entry
+                fallback_entry = f"Journal entry (simplified): {content[:100]}"
+                fallback_success = self.journal.write_entry(fallback_entry)
+                
+                if fallback_success:
+                    return f"Journal entry recorded (simplified format): '{fallback_entry[:50]}...'"
+                else:
+                    return "Failed to write journal entry. Check logs for details."
+                    
+        except Exception as e:
+            # Catch any exceptions to prevent failure
+            logger.error(f"Error in _write_journal_entry: {e}", exc_info=True)
+            
+            # Try one last time with an error note
+            try:
+                error_entry = f"Journal entry attempted but encountered error: {str(e)[:100]}"
+                self.journal.write_entry(error_entry)
+                return "Journal entry recorded with error note."
+            except:
+                return "Journal entry attempted but failed. Will keep trying."
 
     def _get_emotional_state(self):
         """Get a natural description of the current emotional state using the LLM"""
@@ -1219,6 +1406,8 @@ class LLMInterface:
             # Get current goals with duration information
             goals = self.tool_registry.get_goals()
             logger.info(f"Retrieved goals in generate_thought: {goals}")
+            logger.info(f"Number of short-term goals: {len(goals.get('short_term_details', []))}")
+            logger.info(f"Raw short-term goals data: {goals.get('short_term_details')}")
             
             # Format short-term goals with bullet points, numbering and duration
             if goals["short_term"]:
@@ -1228,8 +1417,10 @@ class LLMInterface:
                     duration = goal_detail["duration"]
                     cycles = goal_detail["cycles"]
                     numbered_goals.append(f"[{i}] {goal_text} (Active for: {duration}, {cycles} cycles)")
+                    logger.info(f"Formatted goal {i}: {goal_text}")
                 short_term_goals = "\n".join(numbered_goals)
                 logger.info(f"Formatted short-term goals: {short_term_goals}")
+                logger.info(f"Total formatted goals: {len(numbered_goals)}")
             else:
                 short_term_goals = "No short-term goals"
                 logger.info("No short-term goals found")
@@ -1260,20 +1451,51 @@ class LLMInterface:
                 formatted_ego_thoughts = f"Suddenly, the following thought(s) occur to you:\n{ego_thoughts}"
             else:
                 formatted_ego_thoughts = ""
+                
+            # Format user announcement if there is one
+            global USER_ANNOUNCEMENT
+            user_announcement = ""
+            if USER_ANNOUNCEMENT:
+                user_announcement = f"***Suddenly, a voice echoes in your mind:***\n{USER_ANNOUNCEMENT}"
             
             # Initialize the response and tool results
             current_response = ""
             last_tool_results = context.get("last_tool_results", [])
             all_tool_calls = []
             iteration_count = 0
+            ego_thoughts_refresh_interval = 3  # Generate ego thoughts every N iterations
+            intermediate_ego_thoughts = ""
+            max_iterations = 10  # Maximum number of iterations to prevent infinite loops
             
-            while True:
+            while iteration_count < max_iterations:
                 iteration_count += 1
                 # Create span for each thought iteration
                 thought_span = trace.span(name=f"thought-iteration-{iteration_count}")
                 
                 # Logger to trace memory usage
                 logger.info(f"Iteration {iteration_count} - Working with {len(recent_memories)} memories")
+                
+                # Check if it's time to generate intermediate ego thoughts
+                if iteration_count > 1 and (iteration_count - 1) % ego_thoughts_refresh_interval == 0:
+                    logger.info(f"Generating intermediate ego thoughts at iteration {iteration_count}")
+                    # Create updated context with current state
+                    interim_context = dict(context)
+                    interim_context.update({
+                        "recent_memories": recent_memories,
+                        "recent_response": current_response
+                    })
+                    
+                    # Generate intermediate ego thoughts
+                    intermediate_ego_thoughts = self._generate_ego_thoughts(interim_context)
+                    logger.info(f"Generated intermediate ego thoughts: {intermediate_ego_thoughts[:100]}...")
+                    
+                    # Format ego thoughts for the next prompt
+                    if intermediate_ego_thoughts:
+                        formatted_ego_thoughts = f"Suddenly, the following thought(s) occur to you:\n{intermediate_ego_thoughts}"
+                    
+                    # Store the ego thoughts for the next cycle
+                    if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
+                        self.agent.mind.conscious.ego_thoughts = intermediate_ego_thoughts
                 
                 # Prepare the prompt
                 if last_tool_results:
@@ -1298,7 +1520,8 @@ class LLMInterface:
                         recent_user_conversations=recent_user_conversations,
                         user_response=user_response,
                         generation_stats=generation_stats,
-                        ego_thoughts=formatted_ego_thoughts
+                        ego_thoughts=formatted_ego_thoughts,
+                        user_announcement=user_announcement
                     )
                 else:
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
@@ -1315,7 +1538,8 @@ class LLMInterface:
                         recent_user_conversations=recent_user_conversations,
                         user_response=user_response,
                         generation_stats=generation_stats,
-                        ego_thoughts=formatted_ego_thoughts
+                        ego_thoughts=formatted_ego_thoughts,
+                        user_announcement=user_announcement
                     )
                 
                 # Generate the response
@@ -1378,12 +1602,52 @@ class LLMInterface:
                     
                 # Update the last tool results for the next iteration
                 last_tool_results = tool_results
+                
+                # Refresh recent tool usage and results for the next iteration's prompt
+                recent_tools = self.tool_registry.get_recent_tools(10)
+                if recent_tools:
+                    tool_entries = []
+                    for tool in recent_tools:
+                        # Format parameters as key:value pairs
+                        params_str = ", ".join([f"{k}:{v}" for k, v in tool['params'].items()])
+                        # Include timestamp in a readable format
+                        timestamp = datetime.fromisoformat(tool['timestamp']).strftime("%H:%M:%S")
+                        tool_entries.append(f"- {timestamp} | {tool['name']}({params_str})")
+                    recent_tools_text = "\n".join(tool_entries)
+                else:
+                    recent_tools_text = "No recent tool usage"
+                
+                # Update recent tool results too
+                recent_results = self.tool_registry.get_recent_results(3)
+                if recent_results:
+                    results_entries = []
+                    for result in recent_results:
+                        res_obj = result['result']
+                        if res_obj.get('success', False):
+                            output = res_obj.get('output', 'No output')
+                            if len(output) > 200:
+                                output = output[:200] + "..."
+                            results_entries.append(f"- {result['name']}: SUCCESS - {output}")
+                        else:
+                            error = res_obj.get('error', 'Unknown error')
+                            results_entries.append(f"- {result['name']}: FAILED - {error}")
+                    recent_results_text = "\n".join(results_entries)
+                else:
+                    recent_results_text = "No recent results"
+                    
+                # Check if we're about to reach the maximum iterations
+                if iteration_count == max_iterations - 1:
+                    # Add a message to inform that we're stopping due to too many iterations
+                    loop_warning = "\n\n[SYSTEM: Maximum tool invocation loop reached. Forcing stop of tool chain. Please complete your thought without additional tools.]"
+                    current_response += loop_warning
+                    logger.warning(f"Maximum iteration limit reached ({max_iterations}). Forcing end of tool chain.")
             
             # Generate ego thoughts about this thinking cycle
             updated_context = dict(context)
             updated_context.update({
                 "recent_memories": recent_memories,
-                "recent_response": current_response
+                "recent_response": current_response,
+                "previous_ego_thoughts": intermediate_ego_thoughts
             })
             
             new_ego_thoughts = self._generate_ego_thoughts(updated_context)
@@ -1406,6 +1670,10 @@ class LLMInterface:
             # Store the ego thoughts for the next cycle
             if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
                 self.agent.mind.conscious.ego_thoughts = new_ego_thoughts
+            
+            # After successful generation and confirmation that the announcement was included:
+            if USER_ANNOUNCEMENT and current_response:  # Only clear if we've generated a response
+                USER_ANNOUNCEMENT = None
             
             return current_response, new_ego_thoughts
             
@@ -1499,8 +1767,8 @@ class LLMInterface:
     
     def _handle_tool_invocations(self, response, context):
         """Parse and handle tool invocations in the response"""
-        # Updated regex to handle quoted parameters and more flexible formats
-        tool_pattern = r'\[TOOL:\s*(\w+)\s*\(([^)]*)\)\]'
+        # Updated regex to handle quoted parameters and nested tool invocations
+        tool_pattern = r'\[TOOL:\s*(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)\]'
         matches = re.findall(tool_pattern, response)
         
         if not matches:
@@ -1533,21 +1801,35 @@ class LLMInterface:
             logger.info(f"Parsing parameters for tool {tool_name}: '{params_str}'")
             
             if params_str:
-                # Handle both key:value and plain value formats
-                if ':' in params_str:
-                    # Handle key:value format
-                    # Split by commas, but not within quotes
-                    param_pairs = re.findall(r'([^,]+?):([^,]+?)(?:,|$)', params_str)
-                    logger.info(f"Parsed parameter pairs: {param_pairs}")
+                # Handle parameters with quoted values that may contain nested tool invocations
+                if '=' in params_str:
+                    # Match key=value pairs where value can be quoted and contain nested content
+                    param_pairs = []
+                    # First try to extract parameters with quoted values
+                    quoted_params = re.findall(r'(\w+)=(["\'])((?:(?!\2).|\\\2)*)\2', params_str)
+                    for key, quote, value in quoted_params:
+                        params[key] = value
+                        # Mark this part as processed by replacing it in the params_str
+                        params_str = params_str.replace(f"{key}={quote}{value}{quote}", "", 1)
+                    
+                    # Then process any remaining key=value pairs without quotes
+                    remaining_params = re.findall(r'(\w+)=([^,"\'][^,]*)', params_str)
+                    for key, value in remaining_params:
+                        key = key.strip()
+                        value = value.strip()
+                        params[key] = value
+                
+                # If we still don't have parameters and there are colons, try key:value format
+                if not params and ':' in params_str:
+                    # Handle key:value format with possible quoted values
+                    param_pairs = re.findall(r'([^,:]+?):([^,]+?)(?:,|$)', params_str)
                     
                     for key, value in param_pairs:
                         key = key.strip()
                         value = value.strip()
                         
                         # Remove quotes if present
-                        if value.startswith('"') and value.endswith('"'):
-                            value = value[1:-1]
-                        elif value.startswith("'") and value.endswith("'"):
+                        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                             value = value[1:-1]
                         
                         # Try to convert value to appropriate type
@@ -1556,21 +1838,18 @@ class LLMInterface:
                                 value = True
                             elif value.lower() == 'false':
                                 value = False
-                            elif '.' in value:
+                            elif '.' in value and value.replace('.', '', 1).isdigit():
                                 value = float(value)
-                            else:
-                                try:
-                                    value = int(value)
-                                except ValueError:
-                                    # Keep as string if conversion fails
-                                    pass
+                            elif value.isdigit():
+                                value = int(value)
                         except (ValueError, AttributeError):
                             # Keep as string if conversion fails
                             pass
                         
                         params[key] = value
-                else:
-                    # Handle plain value format (e.g., set_focus(data analysis))
+                
+                # If we still don't have parameters, treat the whole string as a single value
+                if not params:
                     params["value"] = params_str.strip()
             
             logger.info(f"Final parsed parameters for {tool_name}: {params}")
@@ -1686,17 +1965,40 @@ class LLMInterface:
             # Get the templates
             from templates import EGO_SYSTEM_PROMPT_TEMPLATE, EGO_PROMPT_TEMPLATE
             
-            emotional_state = context.get("emotional_state", {})
-            recent_memories = context.get("recent_memories", [])
-            if isinstance(recent_memories, list) and recent_memories and hasattr(recent_memories[0], 'content'):
-                recent_memories = [m.content for m in recent_memories if hasattr(m, 'content')]
+            # Check for previous ego thoughts
+            previous_ego_thoughts = context.get("previous_ego_thoughts", "")
+            if previous_ego_thoughts:
+                logger.info(f"Found previous ego thoughts: {previous_ego_thoughts[:100]}...")
             
+            emotional_state = context.get("emotional_state", {})
+            
+            # Get more recent memories (10 instead of the default 5)
+            if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'memory'):
+                # Retrieve 10 memories for ego's broader perspective
+                recent_memories = self.agent.mind.memory.recall(emotional_state, n=10)
+                if isinstance(recent_memories, list) and recent_memories and hasattr(recent_memories[0], 'content'):
+                    recent_memories = [m.content for m in recent_memories if hasattr(m, 'content')]
+                logger.info(f"Retrieved {len(recent_memories)} memories for ego perspective")
+            else:
+                # Fall back to context memories if direct memory access not available
+                recent_memories = context.get("recent_memories", [])
+                if isinstance(recent_memories, list) and recent_memories and hasattr(recent_memories[0], 'content'):
+                    recent_memories = [m.content for m in recent_memories if hasattr(m, 'content')]
+            
+            # Limit subconscious thoughts to just a few key ones
             subconscious_thoughts = context.get("subconscious_thoughts", [])
+            if isinstance(subconscious_thoughts, list) and len(subconscious_thoughts) > 3:
+                # Just keep the 3 most important subconscious thoughts
+                subconscious_thoughts = subconscious_thoughts[:3]
+                logger.info("Limited subconscious thoughts to 3 for ego perspective")
+            
             stimuli = context.get("stimuli", {})
             current_focus = context.get("current_focus", "Nothing in particular")
             
             # Get goals with duration information
             goals = self.tool_registry.get_goals()
+            logger.info(f"Retrieved goals in _generate_ego_thoughts: {goals}")
+            logger.info(f"Number of short-term goals in ego thoughts: {len(goals.get('short_term_details', []))}")
             
             # Format short-term goals with duration
             if goals.get("short_term_details"):
@@ -1704,18 +2006,21 @@ class LLMInterface:
                 for i, goal_detail in enumerate(goals["short_term_details"]):
                     text = goal_detail["text"]
                     duration = goal_detail["duration"]
-                    cycles = goal_detail["cycles"]
+                    cycles = goal_detail.get("cycles", 0)
                     short_term_goals.append(f"[{i}] {text} (Active for: {duration}, {cycles} cycles)")
+                    logger.info(f"Ego thoughts - formatted goal {i}: {text}")
                 short_term_goals = "\n".join(short_term_goals)
+                logger.info(f"Ego thoughts - total formatted goals: {len(short_term_goals.split('\n'))}")
             else:
                 short_term_goals = "No short-term goals"
+                logger.info("Ego thoughts - no short-term goals found")
             
             # Format long-term goal with duration
             if goals.get("long_term_details"):
                 long_term_detail = goals["long_term_details"]
                 text = long_term_detail["text"]
                 duration = long_term_detail["duration"]
-                cycles = long_term_detail["cycles"]
+                cycles = long_term_detail.get("cycles", 0)
                 long_term_goal = f"{text} (Active for: {duration}, {cycles} cycles)"
             else:
                 long_term_goal = "No long-term goal"
@@ -1774,6 +2079,11 @@ class LLMInterface:
             else:
                 recent_results_text = "No recent results"
             
+            # Also include the current thought response if available
+            recent_response = context.get("recent_response", "")
+            if recent_response:
+                recent_memories.append(f"[MOST RECENT THOUGHT]: {recent_response}")
+            
             # Format the prompt with all the information
             ego_prompt = EGO_PROMPT_TEMPLATE.format(
                 emotional_state=emotional_state,
@@ -1790,6 +2100,10 @@ class LLMInterface:
                 recent_tools=recent_tools_text,
                 recent_results=recent_results_text
             )
+            
+            # If we have previous ego thoughts, add them to the prompt
+            if previous_ego_thoughts:
+                ego_prompt += f"\n\nYour previous ego thoughts were:\n{previous_ego_thoughts}\n\nConsider these thoughts as you develop new insights, but don't repeat them exactly."
             
             # Generate the ego thoughts
             ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_PROMPT_TEMPLATE)
