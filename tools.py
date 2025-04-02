@@ -38,12 +38,12 @@ class Tool:
                 if "success" not in result:
                     result = {
                         "success": True,
-                        "output": str(result)
+                        "output": self._format_result(result)
                     }
             else:
                 result = {
                     "success": True,
-                    "output": str(result)
+                    "output": self._format_result(result)
                 }
             
             # Log the result with yellow highlighting
@@ -58,6 +58,16 @@ class Tool:
                 "success": False,
                 "error": str(e)
             }
+            
+    def _format_result(self, result):
+        """Format the result to prevent truncation of complex objects"""
+        if isinstance(result, (dict, list, tuple, set)):
+            try:
+                import json
+                return json.dumps(result, indent=2, default=str)
+            except:
+                pass
+        return str(result)
             
     def get_documentation(self):
         """Return documentation for this tool"""
@@ -753,6 +763,16 @@ class ToolRegistry:
         ))
         
         logger.info("Registered all default tools")
+
+    def _format_result(self, result):
+        """Format the result to prevent truncation of complex objects"""
+        if isinstance(result, (dict, list, tuple, set)):
+            try:
+                import json
+                return json.dumps(result, indent=2, default=str)
+            except:
+                pass
+        return str(result)
 
 class Journal:
     def __init__(self, file_path="agent_journal.txt"):

@@ -86,7 +86,7 @@ logger = logging.getLogger('agent_simulation')
 logger.addHandler(console_handler)
 
 # Define API endpoint configuration
-API_HOST = "mlboy"
+API_HOST = "bestiary"
 API_PORT = "5000"
 API_BASE_URL = f"http://{API_HOST}:{API_PORT}/v1"
 
@@ -1454,9 +1454,6 @@ class LLMInterface:
                 
             # Format user announcement if there is one
             global USER_ANNOUNCEMENT
-            user_announcement = ""
-            if USER_ANNOUNCEMENT:
-                user_announcement = f"***Suddenly, a voice echoes in your mind:***\n{USER_ANNOUNCEMENT}"
             
             # Initialize the response and tool results
             current_response = ""
@@ -1498,6 +1495,10 @@ class LLMInterface:
                         self.agent.mind.conscious.ego_thoughts = intermediate_ego_thoughts
 
                 # Prepare the prompt
+                user_announcement = ""
+                if USER_ANNOUNCEMENT:
+                    user_announcement = f"***Suddenly, a voice echoes in your mind:***\n{USER_ANNOUNCEMENT}"
+
                 if last_tool_results:
                     # Format all tool results for the prompt
                     results_text = "\n".join([
@@ -1543,6 +1544,10 @@ class LLMInterface:
                 
                 # Generate the response
                 response = self._generate_completion(prompt, AGENT_SYSTEM_INSTRUCTIONS)
+
+                # After successful generation and confirmation that the announcement was included:
+                if USER_ANNOUNCEMENT and current_response:  # Only clear if we've generated a response
+                    USER_ANNOUNCEMENT = None
                 
                 # Parse and handle any tool invocations
                 parsed_response, tool_results = self._handle_tool_invocations(response, context)
@@ -1670,9 +1675,6 @@ class LLMInterface:
             if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
                 self.agent.mind.conscious.ego_thoughts = new_ego_thoughts
             
-            # After successful generation and confirmation that the announcement was included:
-            if USER_ANNOUNCEMENT and current_response:  # Only clear if we've generated a response
-                USER_ANNOUNCEMENT = None
             
             return current_response, new_ego_thoughts
             
@@ -1764,6 +1766,16 @@ class LLMInterface:
             "output": f"Generation statistics:\n- Total generations: {stats['generation_counter']}\n- Total thinking time: {stats['total_thinking_time']:.2f}s\n- Average thinking time: {stats['avg_thinking_time']:.2f}s per generation"
         }
     
+    def _format_result(self, result):
+        """Format the result to prevent truncation of complex objects"""
+        if isinstance(result, (dict, list, tuple, set)):
+            try:
+                import json
+                return json.dumps(result, indent=2, default=str)
+            except:
+                pass
+        return str(result)
+
     def _handle_tool_invocations(self, response, context):
         """Parse and handle tool invocations in the response"""
         # Updated regex to handle quoted parameters and nested tool invocations
@@ -1871,12 +1883,12 @@ class LLMInterface:
                     if "success" not in result:
                         result = {
                             "success": True,
-                            "output": str(result)
+                            "output": self._format_result(result)
                         }
                 else:
                     result = {
                         "success": True,
-                        "output": str(result)
+                        "output": self._format_result(result)
                     }
                 
                 # Update Langfuse with successful result
@@ -1946,11 +1958,11 @@ class LLMInterface:
         # Format the result for display
         if isinstance(result, dict):
             if result.get("success", False):
-                return str(result.get("output", ""))
+                return self._format_result(result.get("output", ""))
             else:
                 return f"Error: {result.get('error', 'Unknown error')}"
         
-        return str(result)
+        return self._format_result(result)
 
     def attach_to_agent(self, agent):
         """Attach this LLM interface to an agent"""
