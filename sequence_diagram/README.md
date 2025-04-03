@@ -46,7 +46,7 @@ These diagrams focus on:
 
 ## Viewing the Diagrams
 
-![Sequence Diagram](sequence_diagram.png)
+![Agent Execution Flow](agent_execution_flow.png)
 
 ![Thought Processing Cycle](thought_processing_cycle.png)
 
