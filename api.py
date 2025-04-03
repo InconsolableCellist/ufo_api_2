@@ -50,12 +50,6 @@ class LLMConfigUpdate(BaseModel):
     model: Optional[str] = None
     system_message: Optional[str] = None
 
-class UserMessage(BaseModel):
-    message: str
-    
-class UserAnnouncement(BaseModel):
-    announcement: str
-
 def update_user_response(message):
     """Update the most recent user message with a response"""
     try:
@@ -178,41 +172,6 @@ async def next_step():
     simulation_results.append(step_result)
     
     return step_result
-
-@app.post("/send_message")
-async def send_message(message: UserMessage):
-    """Send a message to the agent"""
-    if not message.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-        
-    # TODO: Improve user message handling:
-    # - Add proper conversation history tracking
-    # - Implement message ID system for tracking conversations
-    # - Add metadata for messages (timestamp, read status, etc.)
-    # - Implement proper message storage (database instead of text file)
-    # - Add emotion analysis of incoming messages to influence agent state
-    
-    # Update the most recent agent message with this user response
-    success = update_user_response(message.message)
-    
-    if not success:
-        return {"status": "warning", "message": "Updated user message but couldn't find the most recent agent request"}
-    
-    return {"status": "success", "message": "Message sent to agent"}
-
-@app.post("/send_announcement")
-async def send_announcement(announcement: UserAnnouncement):
-    """Send a special announcement that will appear as a mysterious voice in the agent's mind"""
-    if not announcement.announcement.strip():
-        raise HTTPException(status_code=400, detail="Announcement cannot be empty")
-        
-    # Import the module to modify its global variable
-    import model
-    
-    # Set the global announcement
-    model.USER_ANNOUNCEMENT = announcement.announcement
-    
-    return {"status": "success", "message": "Announcement set. It will appear in the next message to the LLM."}
 
 @app.get("/summary")
 async def get_summary():

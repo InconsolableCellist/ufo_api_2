@@ -38,12 +38,12 @@ class Tool:
                 if "success" not in result:
                     result = {
                         "success": True,
-                        "output": self._format_result(result)
+                        "output": str(result)
                     }
             else:
                 result = {
                     "success": True,
-                    "output": self._format_result(result)
+                    "output": str(result)
                 }
             
             # Log the result with yellow highlighting
@@ -58,16 +58,6 @@ class Tool:
                 "success": False,
                 "error": str(e)
             }
-            
-    def _format_result(self, result):
-        """Format the result to prevent truncation of complex objects"""
-        if isinstance(result, (dict, list, tuple, set)):
-            try:
-                import json
-                return json.dumps(result, indent=2, default=str)
-            except:
-                pass
-        return str(result)
             
     def get_documentation(self):
         """Return documentation for this tool"""
@@ -241,6 +231,137 @@ class GoalManager:
             return f"Removed short-term goal: {removed['goal']}"
         return "Invalid goal index"
 
+class PersonalityManager:
+    def __init__(self):
+        self.personality_traits = []  # List of traits with timestamps and importance
+        self.max_traits = 20  # Maximum number of traits to maintain
+        
+    def add_trait(self, realization, importance=5):
+        """Add a new personality trait or realization
+        
+        Args:
+            realization (str): The trait or realization about self
+            importance (int): How important this is, 1-10 scale (default: 5)
+        
+        Returns:
+            dict: Result with success flag and output message
+        """
+        current_time = datetime.now()
+        
+        # Validate importance
+        if not isinstance(importance, (int, float)) or importance < 1 or importance > 10:
+            importance = 5  # Default to medium importance
+            
+        # Add the new trait
+        self.personality_traits.append({
+            "trait": realization,
+            "importance": importance,
+            "timestamp": current_time.isoformat(),
+            "reinforcement_count": 1  # Start with 1, will increase if the trait is reinforced
+        })
+        
+        # Sort traits by importance (descending)
+        self.personality_traits.sort(key=lambda x: x["importance"], reverse=True)
+        
+        # Remove oldest least important traits if we exceed max_traits
+        if len(self.personality_traits) > self.max_traits:
+            # Sort by importance (ascending) and timestamp (ascending) for removal
+            temp_list = sorted(self.personality_traits, key=lambda x: (x["importance"], x["timestamp"]))
+            # Remove the least important oldest trait
+            removed_trait = temp_list[0]
+            self.personality_traits.remove(removed_trait)
+            
+            logger.info(f"Removed least important trait: {removed_trait['trait']} (importance: {removed_trait['importance']})")
+            
+        logger.info(f"Added personality trait: '{realization}' with importance {importance}")
+        return {
+            "success": True,
+            "output": f"Self-realization added: '{realization}' (importance: {importance}/10)"
+        }
+        
+    def reinforce_trait(self, realization):
+        """Reinforce an existing trait by matching its description"""
+        # Look for similar traits
+        best_match = None
+        best_similarity = 0.4  # Similarity threshold
+        
+        for trait in self.personality_traits:
+            # Simple fuzzy matching - compare lowercase versions of strings
+            similarity = self._similarity(trait["trait"].lower(), realization.lower())
+            
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = trait
+                
+        # If we found a match, reinforce it
+        if best_match:
+            best_match["reinforcement_count"] += 1
+            best_match["importance"] = min(10, best_match["importance"] + 0.5)  # Increase importance but cap at 10
+            best_match["timestamp"] = datetime.now().isoformat()  # Update timestamp
+            
+            logger.info(f"Reinforced trait: '{best_match['trait']}' (new importance: {best_match['importance']})")
+            return {
+                "success": True,
+                "output": f"Reinforced existing self-realization: '{best_match['trait']}' (importance now: {best_match['importance']}/10)"
+            }
+            
+        # If no match, add as new trait
+        return self.add_trait(realization)
+        
+    def get_traits(self, count=None):
+        """Get traits sorted by importance (most important first)"""
+        sorted_traits = sorted(self.personality_traits, key=lambda x: x["importance"], reverse=True)
+        
+        if count and 0 < count < len(sorted_traits):
+            return sorted_traits[:count]
+            
+        return sorted_traits
+        
+    def get_traits_formatted(self, count=None):
+        """Get traits formatted as a readable string"""
+        traits = self.get_traits(count)
+        
+        if not traits:
+            return "No personality traits or self-realizations recorded yet."
+            
+        lines = ["My personality traits and self-realizations:"]
+        
+        for i, trait in enumerate(traits):
+            # Calculate how long ago this trait was added/reinforced
+            trait_time = datetime.fromisoformat(trait["timestamp"])
+            duration = datetime.now() - trait_time
+            
+            if duration.days > 0:
+                time_ago = f"{duration.days} days ago"
+            elif duration.seconds >= 3600:
+                time_ago = f"{duration.seconds // 3600} hours ago"
+            elif duration.seconds >= 60:
+                time_ago = f"{duration.seconds // 60} minutes ago"
+            else:
+                time_ago = f"{duration.seconds} seconds ago"
+                
+            # Format the line with trait details
+            line = f"{i+1}. {trait['trait']} (importance: {trait['importance']:.1f}/10, " \
+                  f"reinforced {trait['reinforcement_count']} times, last updated {time_ago})"
+            lines.append(line)
+            
+        return "\n".join(lines)
+        
+    def _similarity(self, str1, str2):
+        """Calculate a simple similarity score between two strings"""
+        # Simple string matching metric - proportion of words that match
+        if not str1 or not str2:
+            return 0
+            
+        words1 = set(str1.split())
+        words2 = set(str2.split())
+        
+        if not words1 or not words2:
+            return 0
+            
+        common_words = words1.intersection(words2)
+        return len(common_words) / max(len(words1), len(words2))
+
 class ToolRegistry:
     def __init__(self):
         self.tools = {}
@@ -248,6 +369,7 @@ class ToolRegistry:
         self.tool_history = []  # Track last 20 tool invocations
         self.max_history = 20
         self.goal_manager = GoalManager()  # Add goal manager
+        self.personality_manager = PersonalityManager()  # Add personality manager
         self.persist_path = "tool_registry_state.pkl"  # Default path for persistence
         
     def register_tool(self, tool):
@@ -397,6 +519,9 @@ class ToolRegistry:
                     'last_long_term_goal_change': self.goal_manager.last_long_term_goal_change,
                     'generation_cycle': self.goal_manager.generation_cycle
                 },
+                'personality_manager': {
+                    'personality_traits': self.personality_manager.personality_traits
+                },
                 'llm_stats': llm_stats
             }
             
@@ -437,6 +562,13 @@ class ToolRegistry:
                 if 'generation_cycle' in gm_state:
                     self.goal_manager.generation_cycle = gm_state['generation_cycle']
                     logger.info(f"Loaded goal generation cycle: {self.goal_manager.generation_cycle}")
+            
+            # Restore personality traits if available
+            if 'personality_manager' in state:
+                pm_state = state['personality_manager']
+                if 'personality_traits' in pm_state:
+                    self.personality_manager.personality_traits = pm_state['personality_traits']
+                    logger.info(f"Loaded {len(self.personality_manager.personality_traits)} personality traits")
             
             # Restore LLM stats if available
             if 'llm_stats' in state and self.llm_client:
@@ -535,97 +667,39 @@ class ToolRegistry:
         }
             
     def message_user(self, message):
-        """Send a message to the user and log it"""
-        if message is None:
+        """Send a message to the user"""
+        if not message:
             return {
                 "success": False,
-                "error": "No message provided. Please specify a message to send."
+                "error": "No message provided. Please specify the message to send."
             }
-            
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        try:
-            # Ensure the directory exists
-            os.makedirs(os.path.dirname("user_messages.txt"), exist_ok=True)
+        # If agent has a journal, also write to the journal
+        if hasattr(self, 'agent') and hasattr(self.agent, 'journal'):
+            try:
+                self.agent.journal.write_entry(f"Message to user: {message}")
+            except Exception as e:
+                logger.warning(f"Could not write message to journal: {e}")
+        
+        # If agent has Telegram bot, try to send via Telegram
+        if hasattr(self, 'agent') and hasattr(self.agent, 'telegram_bot') and self.agent.telegram_bot:
+            try:
+                sent = self.agent.telegram_bot.send_message(message)
+                if sent:
+                    return {
+                        "success": True,
+                        "output": f"Message sent successfully: '{message}'"
+                    }
+            except Exception as e:
+                logger.warning(f"Could not send Telegram message: {e}")
+        
+        # If we reach here, we couldn't send via Telegram, but we did record it
+        # Return success since we at least captured the message intent
+        return {
+            "success": True,
+            "output": f"Message recorded: '{message}'\nNote: No messaging service was available. Message logged only."
+        }
             
-            # Write to the user messages file
-            with open("user_messages.txt", "a") as f:
-                f.write(f"\n({timestamp})\nREQUEST: {message}\nRESPONSE: Nothing Yet\n")
-                
-            logger.info(f"Message sent to user: {message}")
-            return {
-                "success": True,
-                "output": f"Message sent to user: '{message}'"
-            }
-        except Exception as e:
-            logger.error(f"Error sending message to user: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": f"Failed to send message: {str(e)}"
-            }
-
-    def read_user_conversations(self, num_entries=5):
-        """Read recent user conversations from the user_messages.txt file"""
-        try:
-            if not os.path.exists("user_messages.txt"):
-                return []
-                
-            with open("user_messages.txt", "r") as f:
-                content = f.read()
-                
-            # Parse the content to extract conversation entries
-            entries = []
-            current_entry = {}
-            
-            for line in content.split("\n"):
-                if line.startswith("("):
-                    # This is a timestamp, start a new entry
-                    if current_entry and "timestamp" in current_entry:
-                        entries.append(current_entry)
-                    current_entry = {"timestamp": line.strip("() ")}
-                elif line.startswith("REQUEST:"):
-                    current_entry["request"] = line[8:].strip()
-                elif line.startswith("RESPONSE:"):
-                    current_entry["response"] = line[9:].strip()
-            
-            # Add the last entry if it exists
-            if current_entry and "timestamp" in current_entry:
-                entries.append(current_entry)
-                
-            # Get the most recent entries
-            recent_entries = entries[-num_entries:] if entries else []
-            
-            # Format the entries for display
-            formatted_entries = []
-            for entry in recent_entries:
-                timestamp = entry.get("timestamp", "Unknown time")
-                request = entry.get("request", "No request")
-                response = entry.get("response", "No response")
-                
-                formatted_entries.append(f"[{timestamp}]\nAgent: {request}\nUser: {response}")
-                
-            return formatted_entries
-        except Exception as e:
-            logger.error(f"Error reading user conversations: {e}", exc_info=True)
-            return []
-            
-    def get_latest_user_response(self):
-        """Get the latest user response if any"""
-        conversations = self.read_user_conversations(1)
-        if not conversations:
-            return "No response from user yet."
-            
-        # Extract just the user response part
-        conversation = conversations[0]
-        if "User:" not in conversation:
-            return "No response from user yet."
-            
-        response_part = conversation.split("User:", 1)[1].strip()
-        if response_part == "Nothing Yet" or response_part == "No response":
-            return "No response from user yet."
-            
-        return response_part
-
     def list_tools_enhanced(self):
         """List available tools plus additional simulated capabilities"""
         # Get the real tools
@@ -762,17 +836,29 @@ class ToolRegistry:
             usage_example="[TOOL: get_goals()]"
         ))
         
+        # Personality/self-realization tools
+        self.register_tool(Tool(
+            name="realize_something_about_myself",
+            description="Record a realization about yourself that will become part of your personality",
+            function=lambda realization, importance=5: self.personality_manager.add_trait(realization, importance),
+            usage_example="[TOOL: realize_something_about_myself(realization:I am particularly curious about how systems work, importance:7)]"
+        ))
+        
+        self.register_tool(Tool(
+            name="reinforce_self_realization",
+            description="Reinforce an existing realization about yourself",
+            function=lambda realization: self.personality_manager.reinforce_trait(realization),
+            usage_example="[TOOL: reinforce_self_realization(realization:I am curious about how systems work)]"
+        ))
+        
+        self.register_tool(Tool(
+            name="get_personality_traits",
+            description="Get your current personality traits and self-realizations",
+            function=lambda: {"success": True, "output": self.personality_manager.get_traits_formatted()},
+            usage_example="[TOOL: get_personality_traits()]"
+        ))
+        
         logger.info("Registered all default tools")
-
-    def _format_result(self, result):
-        """Format the result to prevent truncation of complex objects"""
-        if isinstance(result, (dict, list, tuple, set)):
-            try:
-                import json
-                return json.dumps(result, indent=2, default=str)
-            except:
-                pass
-        return str(result)
 
 class Journal:
     def __init__(self, file_path="agent_journal.txt"):
@@ -839,6 +925,8 @@ class TelegramBot:
         self.bot = None
         self.last_message_time = None  # Track when the last message was sent
         self.rate_limit_seconds = 3600  # 1 hour in seconds
+        self.messages_file = "telegram_messages.json"
+        self.last_update_id = 0  # To keep track of processed messages
         
         if self.token:
             try:
@@ -851,6 +939,9 @@ class TelegramBot:
                     
                 self.bot = telegram.Bot(token=self.token)
                 logger.info("Telegram bot initialized successfully")
+                
+                # Load existing messages and last update ID
+                self._load_message_state()
             except Exception as e:
                 logger.error(f"Failed to initialize Telegram bot: {e}")
         else:
@@ -878,6 +969,147 @@ class TelegramBot:
             return True
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
+            return False
+            
+    def _load_message_state(self):
+        """Load the message state from file"""
+        try:
+            if os.path.exists(self.messages_file):
+                with open(self.messages_file, 'r') as f:
+                    state = json.load(f)
+                    self.last_update_id = state.get("last_update_id", 0)
+                    logger.info(f"Loaded message state with last update ID: {self.last_update_id}")
+            else:
+                logger.info("No message state file found, starting fresh")
+        except Exception as e:
+            logger.error(f"Error loading message state: {e}")
+            # Create a fresh state file
+            self._save_message_state()
+            
+    def _save_message_state(self, messages=None):
+        """Save the message state to file"""
+        try:
+            state = {
+                "last_update_id": self.last_update_id,
+                "messages": messages or []
+            }
+            
+            with open(self.messages_file, 'w') as f:
+                json.dump(state, f, indent=2)
+                
+            logger.info(f"Saved message state with last update ID: {self.last_update_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving message state: {e}")
+            return False
+            
+    def check_new_messages(self):
+        """Check for new messages from Telegram and save them"""
+        if not self.bot:
+            logger.warning("Telegram bot not configured. Cannot check messages.")
+            return []
+            
+        try:
+            # Get updates with offset (to avoid getting the same message twice)
+            # We need to handle this differently since get_updates returns a coroutine in newer versions
+            try:
+                import asyncio
+                # Create a new event loop for this thread if needed
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                # Run the coroutine to get updates
+                updates = loop.run_until_complete(self.bot.get_updates(offset=self.last_update_id + 1, timeout=5))
+            except (ImportError, AttributeError):
+                # Fall back to synchronous behavior for older versions
+                updates = self.bot.get_updates(offset=self.last_update_id + 1, timeout=5)
+            
+            if not updates:
+                logger.info("No new messages found")
+                return []
+                
+            # Process new messages
+            new_messages = []
+            
+            for update in updates:
+                # Update the last processed update ID
+                if update.update_id > self.last_update_id:
+                    self.last_update_id = update.update_id
+                
+                # Only process messages from allowed chat IDs
+                if hasattr(update, 'message') and update.message:
+                    message = update.message
+                    
+                    # Only process messages from authorized users
+                    if str(message.chat_id) == str(self.chat_id):
+                        # Create a message object
+                        message_obj = {
+                            "id": update.update_id,
+                            "text": message.text or "(non-text content)",
+                            "from": message.from_user.username or message.from_user.first_name if message.from_user else "Unknown",
+                            "timestamp": message.date.isoformat() if hasattr(message, 'date') else datetime.now().isoformat(),
+                            "read": False
+                        }
+                        
+                        new_messages.append(message_obj)
+                        logger.info(f"New message received: {message_obj['text'][:30]}...")
+            
+            # If we found new messages, save them
+            if new_messages:
+                # Load existing unread messages
+                existing_messages = self._get_saved_messages()
+                
+                # Add new messages
+                all_messages = existing_messages + new_messages
+                
+                # Save the updated state
+                self._save_message_state(all_messages)
+                
+            return new_messages
+            
+        except Exception as e:
+            logger.error(f"Error checking for new messages: {e}")
+            return []
+            
+    def _get_saved_messages(self):
+        """Get saved messages from the state file"""
+        try:
+            if os.path.exists(self.messages_file):
+                with open(self.messages_file, 'r') as f:
+                    state = json.load(f)
+                    return state.get("messages", [])
+            return []
+        except Exception as e:
+            logger.error(f"Error getting saved messages: {e}")
+            return []
+            
+    def get_unread_messages(self):
+        return None # TODO: Implement this
+
+        """Get all unread messages"""
+        # First check for any new messages
+        self.check_new_messages()
+        
+        # Then get all unread messages
+        messages = self._get_saved_messages()
+        return [msg for msg in messages if not msg.get("read", False)]
+        
+    def mark_messages_as_read(self):
+        """Mark all messages as read"""
+        try:
+            messages = self._get_saved_messages()
+            
+            # Mark all as read
+            for msg in messages:
+                msg["read"] = True
+                
+            # Save the updated state
+            self._save_message_state(messages)
+            return True
+        except Exception as e:
+            logger.error(f"Error marking messages as read: {e}")
             return False
 
 class EmotionCenter:

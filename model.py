@@ -24,10 +24,7 @@ import tools
 from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific classes from tools
 
 # Import templates
-from templates import THOUGHT_PROMPT_TEMPLATE, AGENT_SYSTEM_INSTRUCTIONS, EGO_SYSTEM_INSTRUCTIONS, TOOL_DOCUMENTATION_TEMPLATE
-
-# Global variables
-USER_ANNOUNCEMENT = None  # Will store special announcements from the user
+from templates import THOUGHT_PROMPT_TEMPLATE, AGENT_SYSTEM_INSTRUCTIONS, EGO_SYSTEM_2_INSTRUCTIONS, TOOL_DOCUMENTATION_TEMPLATE
 
 # Initialize colorama
 init(autoreset=True)
@@ -611,6 +608,12 @@ class Conscious:
         )
         
         try:
+            # Track generation time
+            start_time = time.time()
+            
+            # Get ego thoughts from previous cycle if any
+            ego_thoughts = context.get("ego_thoughts", "")
+            
             # Generate thought and get new ego thoughts for next cycle
             thought, new_ego_thoughts = self.llm.generate_thought(context)
             self.ego_thoughts = new_ego_thoughts  # Store ego thoughts for next cycle
@@ -950,9 +953,17 @@ class Agent:
         
         self.llm.tool_registry.register_tool(Tool(
             name="send_telegram",
-            description="Send an urgent message to the human via Telegram (use only for important communications)",
+            description="Send a message",
             function=lambda message: self._send_telegram_message(message),
             usage_example="[TOOL: send_telegram(message:This is an urgent message)]"
+        ))
+        
+        # Tool to read pending Telegram messages
+        self.llm.tool_registry.register_tool(Tool(
+            name="receive_telegram",
+            description="Read pending messages",
+            function=lambda: self._receive_telegram_messages(),
+            usage_example="[TOOL: receive_telegram()]"
         ))
         
         self.llm.tool_registry.register_tool(Tool(
@@ -961,7 +972,48 @@ class Agent:
             function=lambda entry=None, text=None, message=None, value=None: self._write_journal_entry(entry or text or message or value),
             usage_example="[TOOL: write_journal(entry:Today I learned something interesting)] or [TOOL: write_journal(entry=\"My journal entry with quotes\")] or [TOOL: write_journal(text:Another format example)] (for the love of God why can't you consistently call this properly?)"
         ))
+
+    def _receive_telegram_messages(self):
+        """Read unread messages from Telegram and mark them as read"""
+        if not self.telegram_bot.token:
+            return {
+                "success": False,
+                "output": "Telegram bot not configured. Cannot receive messages."
+            }
         
+        try:
+            # Get unread messages
+            unread_messages = self.telegram_bot.get_unread_messages()
+            
+            if not unread_messages:
+                return {
+                    "success": True,
+                    "output": "No new messages."
+                }
+            
+            # Format messages for display
+            formatted_messages = []
+            for msg in unread_messages:
+                timestamp = msg.get("timestamp", "Unknown time")
+                sender = msg.get("from", "Unknown sender")
+                text = msg.get("text", "(No text)")
+                
+                formatted_messages.append(f"[{timestamp}] {sender}: {text}")
+            
+            # Mark messages as read
+            self.telegram_bot.mark_messages_as_read()
+            
+            return {
+                "success": True,
+                "output": "New messages:\n\n" + "\n\n".join(formatted_messages)
+            }
+        except Exception as e:
+            logger.error(f"Error receiving Telegram messages: {e}", exc_info=True)
+            return {
+                "success": False,
+                "output": f"Error receiving messages: {str(e)}"
+            }
+
     def _adjust_emotion(self, emotion, change):
         """Adjust an emotion's intensity"""
         if emotion in self.mind.emotion_center.emotions:
@@ -1328,8 +1380,11 @@ class LLMInterface:
                 "total_thinking_time": self.total_thinking_time
             }
         )
-
+        
         try:
+            # Track generation time
+            start_time = time.time()
+            
             # Get ego thoughts from previous cycle if any
             ego_thoughts = context.get("ego_thoughts", "")
             
@@ -1368,7 +1423,7 @@ class LLMInterface:
             journal_context = ""
             if recent_journal_entries:
                 journal_context = "\nRecent journal entries:\n" + "\n".join(recent_journal_entries)
-                
+            
             # Format recent tool usage
             recent_tools = self.tool_registry.get_recent_tools(10)
             if recent_tools:
@@ -1436,25 +1491,23 @@ class LLMInterface:
                 long_term_goal = "No long-term goal"
                 logger.info("No long-term goal found")
             
-            # Get recent user conversations and latest response
-            recent_user_conversations = "\n\n".join(self.tool_registry.read_user_conversations(5))
-            if not recent_user_conversations:
-                recent_user_conversations = "No recent conversations with the user."
-            
-            user_response = self.tool_registry.get_latest_user_response()
-            
             # Add generation statistics
             generation_stats = f"You've thought {self.generation_counter} times for {self.total_thinking_time:.2f}s"
             
+            # Check for pending Telegram messages
+            pending_messages = "No pending messages."
+            if hasattr(self, 'agent') and self.agent and self.agent.telegram_bot:
+                # Just check if there are unread messages, don't mark as read yet
+                unread_messages = self.agent.telegram_bot.get_unread_messages()
+                if unread_messages:
+                    pending_messages = f"You have {len(unread_messages)} unread message(s). Use the receive_telegram tool to read them."
+            
             # Format ego thoughts if there are any
             if ego_thoughts:
-                formatted_ego_thoughts = f"Suddenly, the following thought(s) occur to you:\n{ego_thoughts}"
+                formatted_ego_thoughts = f"!!!\n***Suddenly, the following thought(s) occur to you. You try to ignore them but cannot, they echo in your mind for a full minute, completely diverting your attention before they fade, and you can think again:\n{ego_thoughts}\n***\n!!!"
             else:
                 formatted_ego_thoughts = ""
                 
-            # Format user announcement if there is one
-            global USER_ANNOUNCEMENT
-            
             # Initialize the response and tool results
             current_response = ""
             last_tool_results = context.get("last_tool_results", [])
@@ -1488,17 +1541,30 @@ class LLMInterface:
                     
                     # Format ego thoughts for the next prompt
                     if intermediate_ego_thoughts:
-                        formatted_ego_thoughts = f"Suddenly, the following thought(s) occur to you:\n{intermediate_ego_thoughts}"
+                        formatted_ego_thoughts = f"!!!\n***Suddenly, the following thought(s) occur to you. You try to ignore them but cannot, they echo in your mind for a full minute, completely diverting your attention before they fade, and you can think again:\n{intermediate_ego_thoughts}\n***\n!!!"
                     
                     # Store the ego thoughts for the next cycle
                     if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
                         self.agent.mind.conscious.ego_thoughts = intermediate_ego_thoughts
+                        
+                        # Also add ego thoughts to short-term memory
+                        if hasattr(self.agent.mind, 'memory'):
+                            memory_entry = f"[EGO THOUGHTS]: {intermediate_ego_thoughts}"
+                            self.agent.mind.memory.short_term.append(memory_entry)
+                            logger.info(f"Added intermediate ego thoughts to short-term memory")
+                            
+                            # Update recent_memories to include the ego thoughts
+                            if isinstance(working_short_term_memory[0], str):
+                                working_short_term_memory.append(memory_entry)
+                                recent_memories = working_short_term_memory[-10:]  # Keep only last 10
+                            else:
+                                class MemoryEntry:
+                                    def __init__(self, content):
+                                        self.content = content
+                                working_short_term_memory.append(MemoryEntry(memory_entry))
+                                recent_memories = [m.content for m in working_short_term_memory[-10:] if hasattr(m, 'content')]
 
                 # Prepare the prompt
-                user_announcement = ""
-                if USER_ANNOUNCEMENT:
-                    user_announcement = f"***Suddenly, a voice echoes in your mind:***\n{USER_ANNOUNCEMENT}"
-
                 if last_tool_results:
                     # Format all tool results for the prompt
                     results_text = "\n".join([
@@ -1517,11 +1583,9 @@ class LLMInterface:
                         recent_results=recent_results_text,
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
-                        recent_user_conversations=recent_user_conversations,
-                        user_response=user_response,
                         generation_stats=generation_stats,
                         ego_thoughts=formatted_ego_thoughts,
-                        user_announcement=user_announcement
+                        pending_messages=pending_messages
                     )
                 else:
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
@@ -1535,20 +1599,14 @@ class LLMInterface:
                         recent_results=recent_results_text,
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
-                        recent_user_conversations=recent_user_conversations,
-                        user_response=user_response,
                         generation_stats=generation_stats,
                         ego_thoughts=formatted_ego_thoughts,
-                        user_announcement=user_announcement
+                        pending_messages=pending_messages
                     )
                 
                 # Generate the response
                 response = self._generate_completion(prompt, AGENT_SYSTEM_INSTRUCTIONS)
 
-                # After successful generation and confirmation that the announcement was included:
-                if USER_ANNOUNCEMENT and current_response:  # Only clear if we've generated a response
-                    USER_ANNOUNCEMENT = None
-                
                 # Parse and handle any tool invocations
                 parsed_response, tool_results = self._handle_tool_invocations(response, context)
                 
@@ -1674,7 +1732,23 @@ class LLMInterface:
             # Store the ego thoughts for the next cycle
             if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
                 self.agent.mind.conscious.ego_thoughts = new_ego_thoughts
+                
+                # Also add ego thoughts to short-term memory
+                if hasattr(self.agent.mind, 'memory'):
+                    memory_entry = f"[FINAL EGO THOUGHTS]: {new_ego_thoughts}"
+                    self.agent.mind.memory.short_term.append(memory_entry)
+                    logger.info(f"Added final ego thoughts to short-term memory")
             
+            # Track total thinking time
+            end_time = time.time()
+            thinking_time = end_time - start_time
+            self.total_thinking_time += thinking_time
+            
+            # Add the final thought response to short-term memory
+            if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'memory'):
+                memory_entry = f"[FINAL THOUGHT]: {current_response}"
+                self.agent.mind.memory.short_term.append(memory_entry)
+                logger.info(f"Added final thought response to short-term memory")
             
             return current_response, new_ego_thoughts
             
@@ -1974,7 +2048,7 @@ class LLMInterface:
             logger.info("Generating ego thoughts...")
             
             # Get the templates
-            from templates import EGO_SYSTEM_INSTRUCTIONS, THOUGHT_PROMPT_TEMPLATE
+            from templates import EGO_SYSTEM_2_INSTRUCTIONS, THOUGHT_PROMPT_TEMPLATE
             
             # Check for previous ego thoughts
             previous_ego_thoughts = context.get("previous_ego_thoughts", "")
@@ -2036,16 +2110,6 @@ class LLMInterface:
             else:
                 long_term_goal = "No long-term goal"
             
-            # Get user conversations and response
-            if hasattr(self.tool_registry, 'read_user_conversations'):
-                recent_user_conversations = "\n\n".join(self.tool_registry.read_user_conversations(5))
-                if not recent_user_conversations:
-                    recent_user_conversations = "No recent conversations with the user."
-                user_response = self.tool_registry.get_latest_user_response()
-            else:
-                recent_user_conversations = "No conversation history available."
-                user_response = "No response available."
-            
             # Get generation stats
             generation_stats = f"Thought {self.generation_counter} times for {self.total_thinking_time:.2f}s"
             
@@ -2104,14 +2168,12 @@ class LLMInterface:
                 current_focus=current_focus,
                 short_term_goals=short_term_goals,
                 long_term_goal=long_term_goal,
-                recent_user_conversations=recent_user_conversations,
-                user_response=user_response,
                 generation_stats=generation_stats,
                 available_tools=available_tools_text,
                 recent_tools=recent_tools_text,
                 recent_results=recent_results_text,
                 ego_thoughts="",
-                user_announcement=""  # Empty string for ego to omit announcements
+                pending_messages="No pending messages."
             )
             
             # If we have previous ego thoughts, add them to the prompt
@@ -2119,7 +2181,7 @@ class LLMInterface:
                 ego_prompt += f"\n\nYour previous ego thoughts were:\n{previous_ego_thoughts}\n\nConsider these thoughts as you develop new insights, but don't repeat them exactly."
             
             # Generate the ego thoughts
-            ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_INSTRUCTIONS)
+            ego_thoughts = self._generate_completion(ego_prompt, EGO_SYSTEM_2_INSTRUCTIONS)
             
             # Log and return the ego thoughts
             logger.info(f"Ego thoughts generated: {ego_thoughts[:100]}...")

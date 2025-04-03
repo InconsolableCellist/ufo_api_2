@@ -1,0 +1,166 @@
+@startuml Thought Processing Cycle
+
+' Define participants
+participant LLMInterface as "LLMInterface"
+participant Memory as "Memory"
+participant ToolRegistry as "ToolRegistry"
+participant Agent as "Agent"
+participant EmotionCenter as "EmotionCenter"
+participant Subconscious as "Subconscious"
+
+' Start the sequence with trace creation
+-> LLMInterface: generate_thought(context)
+activate LLMInterface
+
+LLMInterface -> LLMInterface: Create trace for thought generation
+note right of LLMInterface
+  langfuse.trace("thought-generation")
+  with metadata about emotional state, 
+  stimuli, and generation counts
+end note
+
+' Step 1: Process context and track generation time
+LLMInterface -> LLMInterface: Start time tracking
+LLMInterface -> LLMInterface: Extract ego_thoughts from previous cycle
+LLMInterface -> LLMInterface: Extract/initialize working_short_term_memory
+
+' Step 2: Gather information for context
+LLMInterface -> Memory: recall recent memories
+activate Memory
+Memory --> LLMInterface: recent_memories
+deactivate Memory
+
+LLMInterface -> Agent: Get recent journal entries if available
+activate Agent
+Agent --> LLMInterface: recent_journal_entries
+deactivate Agent
+
+LLMInterface -> ToolRegistry: list_tools()
+activate ToolRegistry
+ToolRegistry --> LLMInterface: available_tools_docs
+deactivate ToolRegistry
+
+LLMInterface -> ToolRegistry: get_recent_tools(10)
+activate ToolRegistry
+ToolRegistry --> LLMInterface: recent_tools
+deactivate ToolRegistry
+
+LLMInterface -> ToolRegistry: get_recent_results(3)
+activate ToolRegistry
+ToolRegistry --> LLMInterface: recent_results
+deactivate ToolRegistry
+
+LLMInterface -> ToolRegistry: get_goals()
+activate ToolRegistry
+ToolRegistry --> LLMInterface: current_goals
+deactivate ToolRegistry
+
+' Step 3: Generate ego thoughts
+LLMInterface -> LLMInterface: _generate_ego_thoughts(context)
+activate LLMInterface
+
+LLMInterface -> Memory: recall(emotional_state, n=10) 
+activate Memory
+Memory --> LLMInterface: memories_for_ego
+deactivate Memory
+
+LLMInterface -> ToolRegistry: get_goals()
+activate ToolRegistry
+ToolRegistry --> LLMInterface: goals_with_duration
+deactivate ToolRegistry
+
+' Construct ego prompt with all gathered information
+LLMInterface -> LLMInterface: construct ego prompt
+note right of LLMInterface
+  Includes:
+  - Memories for ego perspective
+  - Current goals and focus
+  - Recent tools and results
+  - Previous ego thoughts
+  - Emotional state data
+end note
+
+LLMInterface -> LLMInterface: _generate_completion(EGO_SYSTEM_2_INSTRUCTIONS, ego_prompt)
+LLMInterface --> LLMInterface: ego_thoughts
+deactivate LLMInterface
+
+' Step 4: Build main thought prompt
+LLMInterface -> LLMInterface: Construct thought prompt using THOUGHT_PROMPT_TEMPLATE
+note right of LLMInterface
+  Context includes:
+  - Emotional state
+  - Recent memories
+  - Subconscious thoughts
+  - Ego thoughts
+  - Current stimuli
+  - Current focus
+  - Available tools documentation
+  - Recent journal entries
+  - Recent tool usage and results
+  - Current goals
+end note
+
+' Step 5: Generate initial thought with LLM
+LLMInterface -> LLMInterface: _generate_completion(AGENT_SYSTEM_INSTRUCTIONS, thought_prompt)
+LLMInterface --> LLMInterface: initial_response
+
+' Step 6: Handle tool invocations
+LLMInterface -> LLMInterface: _handle_tool_invocations(response, context)
+activate LLMInterface
+
+LLMInterface -> LLMInterface: Create tools trace
+note right of LLMInterface
+  langfuse.trace("tool-invocations-handling")
+  with metadata about number and names of tools
+end note
+
+' Iterate for each tool found
+loop until no more tools or max iterations
+  ' Parse tool calls with regex pattern
+  LLMInterface -> LLMInterface: Parse tool with regex for [TOOL: name(params)]
+  
+  ' Create span for specific tool
+  LLMInterface -> LLMInterface: Create tool span for tracking
+  
+  ' Parse parameters with sophisticated parameter handling
+  LLMInterface -> LLMInterface: Parse parameters with support for quoted values
+  
+  ' Execute the tool
+  LLMInterface -> ToolRegistry: execute_tool(tool_name, **params)
+  activate ToolRegistry
+  ToolRegistry --> LLMInterface: tool_result
+  deactivate ToolRegistry
+  
+  ' Format result and replace in response
+  LLMInterface -> LLMInterface: Format tool result
+  LLMInterface -> LLMInterface: Replace tool invocation with result in response
+  
+  ' End tool span with result data
+  LLMInterface -> LLMInterface: End tool span with success/error info
+end
+
+' Create summary of tool results if multiple tools were used
+LLMInterface -> LLMInterface: Create results summary if multiple tools
+LLMInterface -> LLMInterface: End tools trace with final results
+
+LLMInterface --> LLMInterface: final_response after tool processing
+deactivate LLMInterface
+
+' Step 7: Generate final ego thoughts after all processing
+LLMInterface -> LLMInterface: _generate_ego_thoughts(updated_context)
+activate LLMInterface
+LLMInterface --> LLMInterface: new_ego_thoughts
+deactivate LLMInterface
+
+' Step 8: Update total thinking time
+LLMInterface -> LLMInterface: Update total_thinking_time
+LLMInterface -> ToolRegistry: save_state()
+activate ToolRegistry
+ToolRegistry --> LLMInterface: state saved
+deactivate ToolRegistry
+
+' Return final thought and new ego thoughts
+<-- LLMInterface: thought, new_ego_thoughts
+deactivate LLMInterface
+
+@enduml 

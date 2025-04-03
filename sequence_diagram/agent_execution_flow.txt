@@ -1,0 +1,185 @@
+@startuml Agent Execution Flow
+
+' Define participants
+participant Client as "Client"
+participant Agent as "Agent"
+participant Mind as "Mind"
+participant EmotionCenter as "EmotionCenter"
+participant Subconscious as "Subconscious"
+participant Conscious as "Conscious"
+participant LLMInterface as "LLMInterface"
+participant Memory as "Memory"
+participant ToolRegistry as "ToolRegistry"
+
+' Main execution flow
+Client -> Agent: process_step(stimuli)
+activate Agent
+
+Agent -> Mind: process_step(stimuli)
+activate Mind
+
+' Create trace for cognitive cycle
+Mind -> Mind: Create trace for cognitive cycle
+note right of Mind
+  langfuse.trace("cognitive-cycle")
+  with metadata about stimuli
+end note
+
+' Update emotional state
+Mind -> EmotionCenter: update(stimuli)
+activate EmotionCenter
+EmotionCenter --> Mind: updated emotional state
+deactivate EmotionCenter
+
+' Subconscious processing
+Mind -> Subconscious: process(trace_id)
+activate Subconscious
+
+' Subconscious processes memories
+Subconscious -> Subconscious: _surface_memories(trace_id)
+activate Subconscious
+Subconscious -> Memory: recall(emotional_state, query, n)
+activate Memory
+Memory --> Subconscious: retrieved memories
+deactivate Memory
+deactivate Subconscious
+
+' Subconscious generates random thoughts
+Subconscious -> Subconscious: _generate_random_thoughts(trace_id)
+activate Subconscious
+Subconscious --> Subconscious: random thoughts
+deactivate Subconscious
+
+' Subconscious processes emotions
+Subconscious -> Subconscious: _process_emotions(trace_id)
+activate Subconscious
+Subconscious --> Subconscious: emotional thoughts
+deactivate Subconscious
+
+Subconscious --> Mind: subconscious_thoughts
+deactivate Subconscious
+
+' Conscious thinking
+Mind -> Conscious: think(stimuli, subconscious_thoughts, trace_id)
+activate Conscious
+
+' Prepare context for thinking
+Conscious -> Conscious: prepare context
+note right of Conscious
+  Context includes:
+  - emotional_state
+  - short_term_memory 
+  - subconscious_thoughts
+  - stimuli
+  - current_focus
+  - ego_thoughts
+end note
+
+' Generate thought 
+Conscious -> LLMInterface: generate_thought(context)
+activate LLMInterface
+
+' Prepare thought generation context
+LLMInterface -> Memory: recall recent memories
+activate Memory
+Memory --> LLMInterface: short_term_memory
+deactivate Memory
+
+LLMInterface -> ToolRegistry: get_goals()
+activate ToolRegistry
+ToolRegistry --> LLMInterface: current goals
+deactivate ToolRegistry
+
+' Ego thought generation
+LLMInterface -> LLMInterface: _generate_ego_thoughts(context)
+activate LLMInterface
+LLMInterface -> Memory: recall(emotional_state, n=10)
+activate Memory
+Memory --> LLMInterface: memories for ego perspective
+deactivate Memory
+
+LLMInterface -> ToolRegistry: get_recent_tools/get_recent_results
+activate ToolRegistry
+ToolRegistry --> LLMInterface: recent tool usage and results
+deactivate ToolRegistry
+
+LLMInterface -> LLMInterface: _generate_completion(ego_prompt)
+LLMInterface --> LLMInterface: ego_thoughts
+deactivate LLMInterface
+
+' Main thought generation
+LLMInterface -> LLMInterface: _generate_completion(thought_prompt)
+LLMInterface --> LLMInterface: initial_response
+
+' Tool handling
+LLMInterface -> LLMInterface: _handle_tool_invocations(response, context)
+activate LLMInterface
+
+' Iterate for each tool found
+loop until no more tools or max iterations
+  LLMInterface -> ToolRegistry: execute_tool(name, params)
+  activate ToolRegistry
+  ToolRegistry --> LLMInterface: tool_result
+  deactivate ToolRegistry
+  
+  ' Update context with tool results
+  LLMInterface -> LLMInterface: update context with tool results
+  
+  ' Generate new response with updated context
+  LLMInterface -> LLMInterface: _generate_completion(updated_context)
+  LLMInterface --> LLMInterface: new response
+end
+
+LLMInterface --> LLMInterface: final response
+deactivate LLMInterface
+
+' Final ego thoughts after processing
+LLMInterface -> LLMInterface: _generate_ego_thoughts(updated_context)
+activate LLMInterface
+LLMInterface --> LLMInterface: new_ego_thoughts
+deactivate LLMInterface
+
+LLMInterface --> Conscious: thought, new_ego_thoughts
+deactivate LLMInterface
+
+' Process emotional implications
+Conscious -> Conscious: _extract_emotional_implications(thought)
+activate Conscious
+Conscious --> Conscious: emotional_implications
+deactivate Conscious
+
+Conscious -> EmotionCenter: update(emotional_implications)
+activate EmotionCenter
+EmotionCenter --> Conscious: updated emotional state
+deactivate EmotionCenter
+
+Conscious -> Memory: add(thought, emotional_state)
+activate Memory
+Memory --> Conscious: memory stored
+deactivate Memory
+
+' Update subconscious with last thought
+Conscious -> Subconscious: last_thought = thought
+Conscious --> Mind: conscious_thought
+deactivate Conscious
+
+' Decision making
+Mind -> Conscious: decide_action(conscious_thought)
+activate Conscious
+Conscious --> Mind: action
+deactivate Conscious
+
+Mind --> Agent: result
+deactivate Mind
+
+' Update physical state
+Agent -> Agent: update_physical_state()
+note right of Agent
+  Updates energy level
+  based on emotional state
+end note
+
+Agent --> Client: result
+deactivate Agent
+
+@enduml 
