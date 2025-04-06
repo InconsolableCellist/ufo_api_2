@@ -17,14 +17,31 @@ from datetime import datetime
 from colorama import Fore, Back, Style, init
 import importlib
 import re
-import telegram  # Add this for Telegram bot functionality
+import telegram  
 import atexit
 import signal
 import tools
-from tools import ToolRegistry, Tool, Journal, TelegramBot  # Import specific classes from tools
-
-# Import templates
+from tools import ToolRegistry, Tool, Journal, TelegramBot 
 from templates import THOUGHT_PROMPT_TEMPLATE, AGENT_SYSTEM_INSTRUCTIONS, EGO_SYSTEM_2_INSTRUCTIONS, TOOL_DOCUMENTATION_TEMPLATE
+import queue
+import datetime
+import importlib
+import re
+import os
+import sys
+import time
+import json
+import queue
+import random
+import logging
+import uuid
+import traceback
+import requests
+import threading
+import pickle
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 # Initialize colorama
 init(autoreset=True)
@@ -42,10 +59,8 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record):
         log_message = super().format(record)
         
-        # Color based on log level
         color = self.COLORS.get(record.levelname, Fore.WHITE)
         
-        # Special coloring for specific content
         if "LLM response:" in log_message:
             # Highlight LLM responses in magenta
             parts = log_message.split("LLM response: '")
@@ -67,7 +82,6 @@ class ColoredFormatter(logging.Formatter):
         
         return color + log_message + Style.RESET_ALL
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -76,18 +90,19 @@ logging.basicConfig(
     ]
 )
 
-# Add colored console handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger = logging.getLogger('agent_simulation')
 logger.addHandler(console_handler)
 
-# Define API endpoint configuration
 API_HOST = "bestiary"
 API_PORT = "5000"
 API_BASE_URL = f"http://{API_HOST}:{API_PORT}/v1"
 
-# Configure Langfuse
+SUMMARY_HOST = "mlboy"
+SUMMARY_PORT = "5000"
+SUMMARY_BASE_URL = f"http://{SUMMARY_HOST}:{SUMMARY_PORT}/v1"
+
 os.environ["LANGFUSE_HOST"] = "http://zen:3000"
 os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-c039333b-d33f-44a5-a33c-5827e783f4b2"
 os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-3c59e794-7426-49ea-b9a1-2eae0999fadf"
@@ -96,20 +111,18 @@ langfuse = Langfuse()
 EMBEDDING_MODEL = "text-embedding-ada-002"
 COMPLETION_MODEL = "local-model"
 
-# LLM generation parameters
 LLM_CONFIG = {
     "model": COMPLETION_MODEL,
     "max_tokens": 750,
     "temperature": 1.75,
-    "system_message": "You are an AI agent's thought process. Respond with natural, introspective thoughts based on the current context, ideally less than 500 tokens."
 }
 
 class Emotion:
     def __init__(self, name, intensity=0.0, decay_rate=0.1, influence_factors=None):
         self.name = name
         self.intensity = intensity
-        self.decay_rate = decay_rate  # How quickly it fades over time
-        self.influence_factors = influence_factors or {}  # What stimuli affect this emotion
+        self.decay_rate = decay_rate
+        self.influence_factors = influence_factors or {}
         
     def update(self, stimuli):
         # Apply stimuli effects
@@ -182,6 +195,17 @@ class Memory:
         self.long_term = []  # Will store content strings
         self.associations = {}  # Memory-emotion associations
         
+        # Added memory metadata tracking
+        self.memory_metadata = {}  # Store metadata for each memory
+        self.thinking_cycle_count = 0  # Track thinking cycles
+        self.memory_types = {
+            "normal_thought": [],
+            "ego_thought": [],
+            "external_info": [],
+            "stimuli_interpretation": [],
+            "research": []  # Add specific type for research results
+        }
+        
         # We'll initialize the FAISS index after getting the first embedding
         self.embedding_dim = embedding_dim  # This will be set dynamically if None
         self.index = None  # Will be initialized after first embedding
@@ -207,17 +231,27 @@ class Memory:
         else:
             logger.info("Starting with fresh memory (no persistence file found)")
             
+    def increment_cycle(self):
+        """Increment the thinking cycle counter"""
+        self.thinking_cycle_count += 1
+        return self.thinking_cycle_count
+        
     def get_embedding(self, text):
         """Get embedding vector for text using OpenAI API"""
         try:
-            logger.info(f"Requesting embedding for text: '{text[:50]}...' (truncated)")
+            # Truncate text to avoid "input too large" errors
+            # Most embedding APIs have token limits (OpenAI's is typically 8191 tokens)
+            max_chars = 8000  # Conservative limit that should work for most APIs
+            if len(text) > max_chars:
+                logger.warning(f"Text too long for embedding ({len(text)} chars), truncating to {max_chars} chars")
+                text = text[:max_chars]
+                
+            logger.info(f"Requesting embedding for text: '{text[:50]}...' (truncated) of length {len(text)}")
             
-            # Log connection attempt
             logger.info(f"Connecting to embedding API at {self.client.base_url}")
             
             start_time = time.time()
             
-            # Create generation in Langfuse
             generation = langfuse.generation(
                 name="embedding-request",
                 model=EMBEDDING_MODEL,
@@ -228,7 +262,6 @@ class Memory:
                 }
             )
             
-            # Try a direct HTTP request to have more control over parameters
             headers = {
                 "Content-Type": "application/json",
             }
@@ -237,10 +270,8 @@ class Memory:
                 "model": EMBEDDING_MODEL,
                 "input": text,
                 "encoding_format": "float"
-                # Remove dimensions and pooling parameters that might be causing issues
             }
             
-            # Fix the URL to avoid double slashes - ensure proper URL construction
             base_url = API_BASE_URL.rstrip('/')  # Remove trailing slash if present
             api_url = f"{base_url}/embeddings"
             logger.info(f"Sending request to: {api_url}")
@@ -249,10 +280,9 @@ class Memory:
                 api_url,
                 headers=headers,
                 json=payload,
-                timeout=30  # Add a timeout to prevent hanging
+                timeout=30 
             )
             
-            # Check for error status codes
             if response_raw.status_code != 200:
                 logger.warning(f"Embedding API returned status code {response_raw.status_code}: {response_raw.text}")
                 raise Exception(f"API returned status code {response_raw.status_code}")
@@ -261,7 +291,6 @@ class Memory:
             
             elapsed = time.time() - start_time
             
-            # Update Langfuse with response
             generation.end(
                 output=f"Embedding vector of dimension {len(response_data['data'][0]['embedding'])}",
                 metadata={
@@ -286,28 +315,65 @@ class Memory:
             
         except Exception as e:
             logger.error(f"Error getting embedding: {e}", exc_info=True)
-            
-            # Log error in Langfuse if it was created
             if 'generation' in locals():
                 generation.end(
                     error=str(e),
                     metadata={"error_type": "embedding_api_error"}
                 )
-            
-            # Raise the exception to be handled by the caller
             raise Exception(f"Failed to get embedding: {str(e)}")
             
-    def add(self, content, emotional_context=None):
-        """Add a memory with its emotional context"""
-        logger.info(f"Adding memory: '{content[:50]}...' (truncated)")
+    def add(self, content, emotional_context=None, thought_type=None, source_stimuli=None, add_prefix=False):
+        """Add a memory with its emotional context and optional metadata
         
-        self.short_term.append(content)
-        self.long_term.append(content)
+        Args:
+            content (str): The content to store
+            emotional_context (dict, optional): Emotional state associated with memory
+            thought_type (str, optional): Type of thought ("normal_thought", "ego_thought", etc.)
+            source_stimuli (dict, optional): Source stimuli that led to this thought
+            add_prefix (bool, optional): Whether to add prefixes like "I remember thinking"
+        """
+        # Create timestamp
+        timestamp = datetime.now().isoformat()
         
-        # Get embedding and add to FAISS index
+        # Add appropriate prefix based on thought type if requested
+        if add_prefix and thought_type:
+            if thought_type == "normal_thought":
+                prefixed_content = f"I remember thinking: {content}"
+            elif thought_type == "ego_thought":
+                prefixed_content = f"I remember reflecting: {content}"
+            elif thought_type == "stimuli_interpretation":
+                prefixed_content = f"I remember interpreting: {content}"
+            else:
+                prefixed_content = content
+        else:
+            prefixed_content = content
+            
+        logger.info(f"Adding memory: '{prefixed_content[:50]}...' (truncated) of length {len(prefixed_content)}")
+        
+        self.short_term.append(prefixed_content)
+        self.long_term.append(prefixed_content)
+        
+        # Store in memory types if applicable
+        memory_id = len(self.long_term) - 1
+        if thought_type in self.memory_types:
+            self.memory_types[thought_type].append(memory_id)
+            
+        # Store metadata
+        self.memory_metadata[prefixed_content] = {
+            "id": memory_id,
+            "original_content": content if prefixed_content != content else None,
+            "type": thought_type,
+            "timestamp": timestamp,
+            "cycle": self.thinking_cycle_count,
+            "emotional_context": emotional_context,
+            "source_stimuli": source_stimuli,
+            "last_recalled": None,
+            "recall_count": 0
+        }
+        
         logger.info("Getting embedding for new memory")
         try:
-            embedding = self.get_embedding(content)
+            embedding = self.get_embedding(prefixed_content)
             
             # Verify dimensions match what we expect
             if self.embedding_dim != embedding.shape[0]:
@@ -316,7 +382,7 @@ class Memory:
                 if len(self.embeddings) > 0:
                     logger.error("Cannot add embedding with different dimension to existing index")
                     # Return without adding this memory to avoid crashing
-                    return
+                    return memory_id
                 else:
                     # If this is our first embedding, just update the dimension
                     self.embedding_dim = embedding.shape[0]
@@ -332,7 +398,7 @@ class Memory:
             
             if emotional_context:
                 logger.info(f"Associating memory with emotional context: {emotional_context}")
-                self.associations[content] = emotional_context
+                self.associations[prefixed_content] = emotional_context
                 
             # Optionally persist after updates
             if self.persist_path:
@@ -342,52 +408,192 @@ class Memory:
         except Exception as e:
             logger.error(f"Failed to add memory due to embedding error: {e}")
             # Remove the memory from long_term since we couldn't embed it
-            if content in self.long_term:
-                self.long_term.remove(content)
+            if prefixed_content in self.long_term:
+                self.long_term.remove(prefixed_content)
             # Don't persist since we didn't successfully add the memory
             
-    def recall(self, emotional_state, query=None, n=3):
-        """Recall memories based on emotional state and/or query text"""
-        if len(self.long_term) == 0:
-            logger.info("No memories to recall (empty long-term memory)")
+        return memory_id
+    
+    def add_thought(self, content, thought_type, emotional_context=None, source_stimuli=None):
+        """Add a thought with metadata and appropriate prefix (convenience method)"""
+        return self.add(
+            content=content, 
+            emotional_context=emotional_context,
+            thought_type=thought_type,
+            source_stimuli=source_stimuli,
+            add_prefix=True
+        )
+        
+    def recall(self, emotional_state, query=None, n=3, memory_type=None):
+        """Recall memories based on emotional state and/or query"""
+        # Use the original recall functionality but update recall statistics
+        results = []
+        
+        if query and self.index is not None and self.embeddings:
+            # Search by semantic similarity
+            logger.info(f"Recalling memories with query: '{query}'")
+            
+            # Get query embedding
+            try:
+                query_embedding = self.get_embedding(query)
+                
+                # Normalize for cosine similarity
+                faiss.normalize_L2(query_embedding.reshape(1, -1))
+                
+                # Search
+                D, I = self.index.search(query_embedding.reshape(1, -1), min(n, len(self.embeddings)))
+                
+                # Get actual memories
+                for i in range(D.shape[1]):
+                    if I[0, i] < len(self.long_term):
+                        memory = self.long_term[I[0, i]]
+                        results.append(memory)
+                        # Update recall statistics
+                        self.update_recall_stats(memory)
+            except Exception as e:
+                logger.error(f"Error during semantic search: {e}", exc_info=True)
+                # Fall back to emotional matching if semantic search fails
+                
+        # Filter by memory type if specified
+        if memory_type and not results:
+            type_results = self.recall_by_type(memory_type, n)
+            # Update recall statistics
+            for memory in type_results:
+                self.update_recall_stats(memory)
+            return type_results
+            
+        # If we didn't get results from semantic search, try emotional matching
+        if not results and emotional_state:
+            # Match based on emotional similarity
+            logger.info("Recalling memories based on emotional state")
+            
+            emotional_matches = []
+            for memory in self.long_term:
+                if memory in self.associations:
+                    if self._emotional_match(self.associations[memory], emotional_state):
+                        emotional_matches.append(memory)
+                        # Update recall statistics
+                        self.update_recall_stats(memory)
+                        
+            # Sort by emotional similarity (could be enhanced)
+            results = emotional_matches[:n]
+            
+        return results
+        
+    def recall_by_type(self, thought_type, n=3):
+        """Recall memories of a specific type"""
+        if thought_type not in self.memory_types or not self.memory_types[thought_type]:
             return []
             
-        # If query is provided, use it for semantic search
-        if query:
-            logger.info(f"Recalling memories with query: '{query[:50]}...' (thought-based recall)")
-            query_embedding = self.get_embedding(query)
-            faiss.normalize_L2(query_embedding.reshape(1, -1))
+        # Get memory IDs of this type
+        memory_ids = self.memory_types[thought_type][-n:]
+        memories = [self.long_term[i] for i in memory_ids]
+        
+        # Update recall statistics
+        for memory in memories:
+            self.update_recall_stats(memory)
             
-            logger.info(f"Searching FAISS index with query embedding")
-            distances, indices = self.index.search(query_embedding.reshape(1, -1), min(n, len(self.long_term)))
-            
-            logger.info(f"FAISS search results - indices: {indices[0]}, distances: {distances[0]}")
-            memories = [self.long_term[idx] for idx in indices[0]]
-            logger.info(f"Retrieved {len(memories)} memories via thought-based semantic search")
-        else:
-            # Filter memories based on emotional state
-            # TODO: Implement more sophisticated emotional memory retrieval:
-            # - Consider context-dependent emotional salience
-            # - Add weighting for memory importance/intensity
-            # - Implement primacy/recency effects
-            # - Consider retrieval based on emotional contrast, not just similarity
-            logger.info(f"Recalling memories based on emotional state: {emotional_state} (emotional recall)")
-            relevant = [mem for mem, ctx in self.associations.items() 
-                       if self._emotional_match(ctx, emotional_state)]
-            logger.info(f"Found {len(relevant)} emotionally relevant memories")
-            
-            memories = random.sample(relevant, min(n, len(relevant))) if relevant else []
-            
-            # If not enough emotional matches, supplement with random memories
-            if len(memories) < n:
-                remaining = n - len(memories)
-                available = [mem for mem in self.long_term if mem not in memories]
-                logger.info(f"Adding {min(remaining, len(available))} random memories to supplement")
-                if available:
-                    memories.extend(random.sample(available, min(remaining, len(available))))
-                    
-        logger.info(f"Recalled {len(memories)} memories in total")
         return memories
+        
+    def recall_research(self, query=None, n=3):
+        """Recall research-specific memories, optionally filtered by query"""
+        # Get research memory IDs
+        if "research" not in self.memory_types or not self.memory_types["research"]:
+            return []
+            
+        research_ids = self.memory_types["research"]
+        research_memories = [self.long_term[i] for i in research_ids]
+        
+        # If no query, return most recent research memories
+        if not query:
+            recent_memories = research_memories[-n:]
+            
+            # Update recall statistics
+            for memory in recent_memories:
+                self.update_recall_stats(memory)
+                
+            return recent_memories
+            
+        # If query provided, try to find matching research memories
+        matching_memories = []
+        for memory in research_memories:
+            # Check if memory contains query (case-insensitive)
+            if query.lower() in memory.lower():
+                matching_memories.append(memory)
+                
+        # Return top n matching memories
+        result_memories = matching_memories[-n:]
+        
+        # Update recall statistics
+        for memory in result_memories:
+            self.update_recall_stats(memory)
+            
+        return result_memories
+        
+    def recall_by_time_range(self, start_time, end_time, n=10):
+        """Recall memories within a specific time range"""
+        matches = []
+        
+        for content, metadata in self.memory_metadata.items():
+            if 'timestamp' in metadata:
+                timestamp = datetime.fromisoformat(metadata['timestamp'])
+                if start_time <= timestamp <= end_time:
+                    matches.append(content)
+                    # Update recall statistics
+                    self.update_recall_stats(content)
+                    
+        # Sort by time (most recent first) and limit to n results
+        matches.sort(key=lambda m: self.memory_metadata.get(m, {}).get('timestamp', ''), reverse=True)
+        return matches[:n]
+        
+    def update_recall_stats(self, content):
+        """Update memory recall statistics"""
+        if content in self.memory_metadata:
+            self.memory_metadata[content]['last_recalled'] = datetime.now().isoformat()
+            self.memory_metadata[content]['recall_count'] = self.memory_metadata[content].get('recall_count', 0) + 1
+            
+    def calculate_memory_importance(self, content):
+        """Calculate importance score based on recency, recall frequency, and emotion"""
+        if content not in self.memory_metadata:
+            return 0
+            
+        metadata = self.memory_metadata[content]
+        
+        # Recency factor (more recent = more important)
+        if 'timestamp' in metadata:
+            time_created = datetime.fromisoformat(metadata['timestamp'])
+            recency = 1.0 - min(1.0, (datetime.now() - time_created).total_seconds() / (7 * 24 * 3600))  # 1 week decay
+        else:
+            recency = 0.5  # Default if no timestamp
+        
+        # Recall frequency factor
+        recall_factor = min(1.0, metadata.get('recall_count', 0) / 10)  # Cap at 10 recalls
+        
+        # Emotional intensity factor
+        emotional_intensity = 0
+        if metadata.get('emotional_context'):
+            # Calculate average emotional intensity
+            intensities = [v for k, v in metadata['emotional_context'].items() 
+                          if isinstance(v, (int, float))]
+            if intensities:
+                emotional_intensity = sum(intensities) / len(intensities)
+        
+        # Calculate importance (weighted sum)
+        importance = (0.4 * recency) + (0.3 * recall_factor) + (0.3 * emotional_intensity)
+        return importance
+        
+    def get_memory_stats(self):
+        """Get statistics about stored memories"""
+        return {
+            "total_memories": len(self.long_term),
+            "by_type": {type_name: len(ids) for type_name, ids in self.memory_types.items()},
+            "thinking_cycles": self.thinking_cycle_count,
+            "most_recalled": sorted(
+                [(content, m.get('recall_count', 0)) for content, m in self.memory_metadata.items()],
+                key=lambda x: x[1],
+                reverse=True
+            )[:5]
+        }
         
     def _emotional_match(self, memory_emotion, current_emotion):
         """Check if memory emotion matches current emotion"""
@@ -452,7 +658,10 @@ class Memory:
         data = {
             'long_term': self.long_term,
             'associations': self.associations,
-            'embeddings': np.vstack(self.embeddings) if self.embeddings else np.array([])
+            'embeddings': np.vstack(self.embeddings) if self.embeddings else np.array([]),
+            'memory_metadata': self.memory_metadata,
+            'memory_types': self.memory_types,
+            'thinking_cycle_count': self.thinking_cycle_count
         }
         
         with open(self.persist_path, 'wb') as f:
@@ -466,20 +675,51 @@ class Memory:
         with open(self.persist_path, 'rb') as f:
             data = pickle.load(f)
             
-        self.long_term = data['long_term']
-        self.associations = data['associations']
+        self.long_term = data.get('long_term', [])
+        self.associations = data.get('associations', {})
         
-        # Rebuild FAISS index
-        if len(data['embeddings']) > 0:
-            # Set embedding_dim from the loaded embeddings
-            self.embedding_dim = data['embeddings'].shape[1]
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
-            self.embeddings = list(data['embeddings'])
-            self.index.add(data['embeddings'])
+        # Load memory metadata if available (for backward compatibility)
+        if 'memory_metadata' in data:
+            self.memory_metadata = data['memory_metadata']
         else:
-            # If no embeddings, set a default dimension but don't create index yet
-            self.embedding_dim = 1536  # Default OpenAI embedding dimension
-            self.index = None  # Will be created on first embedding
+            # Create basic metadata for existing memories
+            self.memory_metadata = {}
+            for i, memory in enumerate(self.long_term):
+                self.memory_metadata[memory] = {
+                    "id": i,
+                    "timestamp": datetime.now().isoformat(),  # Default to now
+                    "cycle": 0,
+                    "type": "external_info",  # Default type
+                    "recall_count": 0
+                }
+            
+        if 'memory_types' in data:
+            self.memory_types = data['memory_types']
+        else:
+            # Create default memory types for backward compatibility
+            self.memory_types = {
+                "normal_thought": [],
+                "ego_thought": [],
+                "external_info": list(range(len(self.long_term))),  # Assume all are external info
+                "stimuli_interpretation": []
+            }
+            
+        if 'thinking_cycle_count' in data:
+            self.thinking_cycle_count = data['thinking_cycle_count']
+        
+        # Rebuild FAISS index if we have embeddings
+        if 'embeddings' in data and len(data['embeddings']) > 0:
+            embeddings = data['embeddings']
+            self.embedding_dim = embeddings.shape[1]
+            self.index = faiss.IndexFlatL2(self.embedding_dim)
+            
+            # Normalize and add to index
+            normalized_embeddings = embeddings.copy()
+            faiss.normalize_L2(normalized_embeddings)
+            self.index.add(normalized_embeddings)
+            
+            # Store embeddings
+            self.embeddings = [embeddings[i] for i in range(embeddings.shape[0])]
 
 class Subconscious:
     def __init__(self, memory, emotion_center):
@@ -505,6 +745,12 @@ class Subconscious:
         """Explicitly set a thought for the subconscious to focus on"""
         if thought:
             logger.info(f"Explicitly setting subconscious focus thought: '{thought[:50]}...'")
+            # Debug the input type and length
+            if not isinstance(thought, str):
+                logger.warning(f"Non-string thought received: type={type(thought)}")
+                # Convert to string if not already
+                thought = str(thought)
+            logger.info(f"Setting last_thought with length: {len(thought)} characters")
             self.last_thought = thought
             return True
         return False
@@ -512,8 +758,19 @@ class Subconscious:
     def find_related_memories(self, thought_query, n=3):
         """Find memories related to a specific thought query"""
         logger.info(f"Finding memories related to specific thought: '{thought_query[:50]}...'")
+        
+        # Debug the input type and length
+        if not isinstance(thought_query, str):
+            logger.warning(f"Non-string thought query received: type={type(thought_query)}")
+            # Convert to string if not already
+            thought_query = str(thought_query)
+        logger.info(f"Memory query with length: {len(thought_query)} characters")
+        
+        # Extract a manageable query from potentially long thought
+        query = self._extract_query_from_thought(thought_query)
+        
         emotional_state = self.emotion_center.get_state()
-        return self.memory.recall(emotional_state, query=thought_query, n=n)
+        return self.memory.recall(emotional_state, query=query, n=n)
         
     def _surface_memories(self, trace_id):
         # TODO: Improve memory surfacing algorithm to consider more factors:
@@ -525,9 +782,21 @@ class Subconscious:
         
         # If we have a recent thought, use it as a query to find related memories
         if self.last_thought:
+            # Debug the last_thought type and length
+            if not isinstance(self.last_thought, str):
+                logger.warning(f"Non-string last_thought found: type={type(self.last_thought)}")
+                # Convert to string if not already
+                self.last_thought = str(self.last_thought)
+            logger.info(f"Using last_thought with length: {len(self.last_thought)} characters")
+            
             logger.info(f"Recalling memories related to recent thought: '{self.last_thought[:50]}...'")
-            # Get memories related to the recent thought (semantic search)
-            thought_related_memories = self.memory.recall(emotional_state, query=self.last_thought, n=2)
+            
+            # Extract key terms from the thought for more focused memory retrieval
+            # This prevents sending overly large texts to the embedding API
+            query = self._extract_query_from_thought(self.last_thought)
+            
+            # Get memories related to the extracted query (semantic search)
+            thought_related_memories = self.memory.recall(emotional_state, query=query, n=2)
             
             # Also get emotionally relevant memories
             emotional_memories = self.memory.recall(emotional_state, n=1)
@@ -542,6 +811,34 @@ class Subconscious:
         else:
             # Fallback to emotional state only if no recent thought
             return self.memory.recall(emotional_state)
+    
+    def _extract_query_from_thought(self, thought):
+        """Extract key terms or a summary from a longer thought for memory queries"""
+        # Debug input
+        logger.info(f"Extracting query from thought of length: {len(thought)} characters")
+        
+        # Start with a simple approach - take the first 100 characters
+        if len(thought) <= 150:
+            return thought
+            
+        # For longer thoughts, extract key sentences
+        sentences = thought.split('.')
+        
+        # Log the number of sentences for debugging
+        logger.info(f"Thought contains {len(sentences)} sentences")
+        
+        # Use the first 1-2 sentences as they often contain the main point
+        if len(sentences) >= 2:
+            extracted = sentences[0].strip() + '. ' + sentences[1].strip()
+            if len(extracted) > 200:
+                extracted = extracted[:200]
+            logger.info(f"Extracted query from thought: '{extracted}' (length: {len(extracted)})")
+            return extracted
+            
+        # Fallback to just the first part of the thought
+        extracted = thought[:150]
+        logger.info(f"Extracted query from thought: '{extracted}' (length: {len(extracted)})")
+        return extracted
         
     def _generate_random_thoughts(self, trace_id):
         # Simple random thought generation
@@ -636,6 +933,8 @@ class Conscious:
             
             # Update the subconscious with the most recent thought
             # This will be used for retrieving related memories in the next cycle
+            # Debug - check what we're setting
+            logger.info(f"Setting subconscious.last_thought with length: {len(thought)} characters")
             self.subconscious.last_thought = thought
             logger.info(f"Updated subconscious with last thought: '{thought[:50]}...'")
             
@@ -857,6 +1156,9 @@ class Agent:
         self.emotion_path = emotion_path
         self.tool_registry_path = tool_registry_path
         
+        # Initialize thought summary manager
+        self.thought_summary_manager = ThoughtSummaryManager()
+        
         # Initialize journal and telegram bot
         self.journal = Journal(journal_path)
         self.telegram_bot = TelegramBot(telegram_token, telegram_chat_id)
@@ -972,7 +1274,30 @@ class Agent:
             function=lambda entry=None, text=None, message=None, value=None: self._write_journal_entry(entry or text or message or value),
             usage_example="[TOOL: write_journal(entry:Today I learned something interesting)] or [TOOL: write_journal(entry=\"My journal entry with quotes\")] or [TOOL: write_journal(text:Another format example)] (for the love of God why can't you consistently call this properly?)"
         ))
+        
+        self.llm.tool_registry.register_tool(Tool(
+            name="report_bug",
+            description="Report a bug to the agent's bug tracking system",
+            function=lambda report: self._report_bug(report),
+            usage_example="[TOOL: report_bug(report:The agent is experiencing a critical issue with memory recall)]"
+        ))
 
+        # Tool to find memories related to a specific thought
+        self.llm.tool_registry.register_tool(Tool(
+            name="find_related_memories",
+            description="Find memories related to a specific thought or concept",
+            function=lambda thought=None, count=3: self._find_related_memories(thought, count),
+            usage_example="[TOOL: find_related_memories(thought:artificial intelligence, count:3)]"
+        ))
+        
+        # Tool to recall research memories
+        self.llm.tool_registry.register_tool(Tool(
+            name="recall_research_memories",
+            description="Recall memories specifically from research, optionally filtered by query",
+            function=lambda query=None, count=3: self._recall_research_memories(query, count),
+            usage_example="[TOOL: recall_research_memories(query:quantum computing, count:3)]"
+        ))
+        
     def _receive_telegram_messages(self):
         """Read unread messages from Telegram and mark them as read"""
         if not self.telegram_bot.token:
@@ -1057,8 +1382,13 @@ class Agent:
         if not thought:
             return "A thought query must be provided"
             
+        # Handle potentially very long inputs
+        if len(thought) > 500:
+            logger.info(f"Truncating very long thought query from {len(thought)} chars to 500 chars")
+            thought = thought[:500] + "..."
+            
         count = int(count)
-        logger.info(f"Finding memories related to thought: '{thought}'")
+        logger.info(f"Finding memories related to thought: '{thought[:50]}...'")
         
         # Use the subconscious to find related memories
         memories = self.mind.subconscious.find_related_memories(thought, count)
@@ -1177,6 +1507,22 @@ class Agent:
             logger.error(f"Error generating emotional state description: {e}", exc_info=True)
             return f"Raw emotional state: {json.dumps(emotion_values, indent=2)}"
 
+    def _report_bug(self, report):
+        """Report a bug to the agent's bug tracking system"""
+        try:
+            # Ensure the report is a string
+            if not isinstance(report, str):
+                report = str(report)
+            
+            # Write the report to the bug tracking file
+            with open("bug_reports.txt", "a") as f:
+                f.write(f"{datetime.now().isoformat()}: {report}\n")
+            
+            return f"Bug reported successfully: '{report[:50]}...'" if len(report) > 50 else f"Bug reported successfully: '{report}'"
+        except Exception as e:
+            logger.error(f"Error reporting bug: {e}", exc_info=True)
+            return f"Failed to report bug: {str(e)}"
+
     def shutdown(self):
         """Properly shutdown the agent, saving all states"""
         logger.info("Agent shutdown initiated")
@@ -1194,6 +1540,11 @@ class Agent:
         if self.tool_registry_path:
             self.llm.tool_registry.save_state(self.tool_registry_path)
             logger.info(f"Tool registry state saved to {self.tool_registry_path}")
+            
+        # Stop thought summarization process
+        if hasattr(self, 'thought_summary_manager'):
+            self.thought_summary_manager.stop_summarization()
+            logger.info("Thought summarization process stopped")
             
         # Write final journal entry
         self.journal.write_entry("Agent shutdown completed. Goodbye for now.")
@@ -1333,26 +1684,95 @@ class LLMInterface:
             logger.info(f"LLM API response received in {elapsed:.2f}s. Total thinking time: {self.total_thinking_time:.2f}s")
             
             # Extract the response text
-            response_text = response.choices[0].message.content
-            logger.info(f"LLM response: '{response_text}'")
+            result = response.choices[0].message.content
             
-            # Update Langfuse with the response
+            # Log the full response (without truncating)
+            logger.info(f"LLM response: '{result}'")
+            
+            # Update the Langfuse generation with the result
             generation.end(
-                output=response_text,
+                output=result,
                 metadata={
                     "elapsed_time": elapsed,
-                    "output_length": len(response_text),
+                    "response_time": elapsed,
+                    "output_length": len(result),
                     "finish_reason": response.choices[0].finish_reason if hasattr(response.choices[0], 'finish_reason') else None,
                     "total_thinking_time": self.total_thinking_time,
-                    "generation_number": self.generation_counter
+                    "total_tokens": len(result) // 4,  # Very rough approximation
+                    "generation_counter": self.generation_counter
                 }
             )
             
             # Save the state to persist thinking time and generation count
             if self.tool_registry:
                 self.tool_registry.save_state()
+            
+            # If we have an agent with a thought_summary_manager, and this is not an ego thought, save to summary db
+            if hasattr(self, 'agent') and hasattr(self.agent, 'thought_summary_manager'):
+                # Clean system message for comparison (trim whitespace)
+                clean_system_msg = system_message.strip()
                 
-            return response_text
+                # For debugging, log the entire system message occasionally
+                if random.random() < 0.05:  # Log 5% of system messages for debugging
+                    logger.debug(f"FULL SYSTEM MESSAGE: '{clean_system_msg}'")
+                
+                # Identify different types of messages
+                is_ego_thought = any([
+                    "agent's ego" in clean_system_msg.lower(),
+                    "you are his ego" in clean_system_msg.lower()
+                ])
+                
+                # Identify pure tool responses (not agent thoughts that include tool invocations)
+                is_tool_response = any([
+                    "search engine" in clean_system_msg.lower(),
+                    "research analyst" in clean_system_msg.lower(),
+                    "web_scrape" in prompt and "response" in prompt.lower(),
+                    "search_web" in prompt and "response" in prompt.lower()
+                ])
+                
+                # Identify agent thought process messages
+                is_agent_thought = any([
+                    "your name is simon" in clean_system_msg.lower(),
+                    "name is simon" in clean_system_msg.lower(),
+                    "you are simon" in clean_system_msg.lower(),
+                    "thought process" in clean_system_msg.lower(),
+                    "agent system instructions" in clean_system_msg.lower()
+                ])
+                
+                # As a fallback, check if it looks like AGENT_SYSTEM_INSTRUCTIONS
+                if not is_agent_thought and len(clean_system_msg) > 100:
+                    # Check for key phrases in the default agent system instructions
+                    agent_instruction_markers = [
+                        "high-agency",
+                        "introspective",
+                        "emotional state",
+                        "your responses should be natural",
+                        "your personality"
+                    ]
+                    
+                    # Count how many markers are present
+                    marker_count = sum(1 for marker in agent_instruction_markers 
+                                      if marker in clean_system_msg.lower())
+                    
+                    # If at least 2 markers are present, it's likely the agent instructions
+                    is_agent_thought = marker_count >= 2
+                
+                if is_agent_thought and len(result) > 100:
+                    # This is the agent's main thought process
+                    self.agent.thought_summary_manager.add_thought(result, thought_type="normal_thought")
+                    logger.info(f"Added agent thought to summary database, length: {len(result)}")
+                elif is_tool_response:
+                    # This is a tool response, not an agent thought
+                    logger.info("Skipping tool response from summary database")
+                else:
+                    # Log detailed message for debugging
+                    logger.info(f"Skipping message - agent:{is_agent_thought}, ego:{is_ego_thought}, tool:{is_tool_response}")
+                    logger.debug(f"System message (first 100 chars): '{clean_system_msg[:100]}'")
+                    
+                    # To debug issues, log the first part of the result too
+                    logger.debug(f"Result preview: '{result[:100]}...'")
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error generating completion: {e}", exc_info=True)
@@ -1374,7 +1794,7 @@ class LLMInterface:
             name="thought-generation",
             metadata={
                 "timestamp": datetime.now().isoformat(),
-                "emotional_state": json.dumps(context.get("emotional_state", {})),
+                "has_ego": bool(context.get("ego_thoughts", "")),
                 "has_stimuli": bool(context.get("stimuli")),
                 "generation_counter": self.generation_counter,
                 "total_thinking_time": self.total_thinking_time
@@ -1382,6 +1802,22 @@ class LLMInterface:
         )
         
         try:
+            # Debug context sizes to identify potential issues
+            logger.info("Analyzing context sizes for thought generation:")
+            for key, value in context.items():
+                if isinstance(value, str):
+                    logger.info(f"  - Context[{key}]: {len(value)} characters")
+                elif isinstance(value, list):
+                    logger.info(f"  - Context[{key}]: {len(value)} items")
+                    # Check if any list items are extremely large
+                    for i, item in enumerate(value[:5]):  # First 5 items only
+                        if isinstance(item, str) and len(item) > 1000:
+                            logger.warning(f"    - Large item at index {i}: {len(item)} characters")
+                elif isinstance(value, dict):
+                    logger.info(f"  - Context[{key}]: {len(value)} keys")
+                else:
+                    logger.info(f"  - Context[{key}]: {type(value)}")
+
             # Track generation time
             start_time = time.time()
             
@@ -1504,7 +1940,19 @@ class LLMInterface:
             
             # Format ego thoughts if there are any
             if ego_thoughts:
-                formatted_ego_thoughts = f"!!!\n***Suddenly, the following thought(s) occur to you. You try to ignore them but cannot, they echo in your mind for a full minute, completely diverting your attention before they fade, and you can think again:\n{ego_thoughts}\n***\n!!!"
+                # Check if these ego thoughts have already been processed
+                processed_ego_marker = "[PROCESSED]"
+                if processed_ego_marker in ego_thoughts:
+                    logger.warning("Ego thoughts already processed - skipping formatting")
+                    formatted_ego_thoughts = ""
+                else:
+                    # Format ego thoughts with a dramatic presentation
+                    formatted_ego_thoughts = f"!!!\n***Suddenly, the following thought(s) occur to you. You try to ignore them but cannot, they echo in your mind for a full minute, completely diverting your attention before they fade, and you can think again:\n{ego_thoughts}\n***\n!!!"
+                    
+                    # Mark as processed to prevent re-formatting in future cycles
+                    if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
+                        self.agent.mind.conscious.ego_thoughts = f"{processed_ego_marker}{ego_thoughts}"
+                        logger.info("Marked ego thoughts as processed")
             else:
                 formatted_ego_thoughts = ""
                 
@@ -1513,9 +1961,13 @@ class LLMInterface:
             last_tool_results = context.get("last_tool_results", [])
             all_tool_calls = []
             iteration_count = 0
-            ego_thoughts_refresh_interval = 3  # Generate ego thoughts every N iterations
+            ego_thoughts_refresh_interval = 10  # Increased from 3 to 10 - Generate ego thoughts less frequently
             intermediate_ego_thoughts = ""
             max_iterations = 10  # Maximum number of iterations to prevent infinite loops
+            
+            # Create a local variable to track whether to show ego thoughts in this iteration
+            # We only want to show them in the first iteration
+            show_ego_thoughts_this_iteration = formatted_ego_thoughts != ""
             
             while iteration_count < max_iterations:
                 iteration_count += 1
@@ -1527,6 +1979,9 @@ class LLMInterface:
                 
                 # Check if it's time to generate intermediate ego thoughts
                 if iteration_count > 1 and (iteration_count - 1) % ego_thoughts_refresh_interval == 0:
+                    # Create Langfuse span for ego thoughts generation
+                    ego_thoughts_span = thought_span.span(name="intermediate-ego-thoughts")
+                    
                     logger.info(f"Generating intermediate ego thoughts at iteration {iteration_count}")
                     # Create updated context with current state
                     interim_context = dict(context)
@@ -1539,13 +1994,26 @@ class LLMInterface:
                     intermediate_ego_thoughts = self._generate_ego_thoughts(interim_context)
                     logger.info(f"Generated intermediate ego thoughts: {intermediate_ego_thoughts[:100]}...")
                     
+                    # Update Langfuse span with the generated ego thoughts
+                    ego_thoughts_span.update(
+                        output=intermediate_ego_thoughts[:200],
+                        metadata={
+                            "ego_thoughts_length": len(intermediate_ego_thoughts),
+                            "iteration": iteration_count
+                        }
+                    )
+                    ego_thoughts_span.end()
+                    
                     # Format ego thoughts for the next prompt
                     if intermediate_ego_thoughts:
                         formatted_ego_thoughts = f"!!!\n***Suddenly, the following thought(s) occur to you. You try to ignore them but cannot, they echo in your mind for a full minute, completely diverting your attention before they fade, and you can think again:\n{intermediate_ego_thoughts}\n***\n!!!"
                     
                     # Store the ego thoughts for the next cycle
                     if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
-                        self.agent.mind.conscious.ego_thoughts = intermediate_ego_thoughts
+                        # Mark as processed to prevent re-formatting in future cycles
+                        processed_ego_marker = "[PROCESSED]"
+                        self.agent.mind.conscious.ego_thoughts = f"{processed_ego_marker}{intermediate_ego_thoughts}"
+                        logger.info("Marked intermediate ego thoughts as processed")
                         
                         # Also add ego thoughts to short-term memory
                         if hasattr(self.agent.mind, 'memory'):
@@ -1563,7 +2031,7 @@ class LLMInterface:
                                         self.content = content
                                 working_short_term_memory.append(MemoryEntry(memory_entry))
                                 recent_memories = [m.content for m in working_short_term_memory[-10:] if hasattr(m, 'content')]
-
+                
                 # Prepare the prompt
                 if last_tool_results:
                     # Format all tool results for the prompt
@@ -1572,37 +2040,66 @@ class LLMInterface:
                         for name, result in last_tool_results
                     ])
                     
+                    # Get recent bug reports if available
+                    recent_bug_reports = ""
+                    if hasattr(self, 'tool_registry') and hasattr(self.tool_registry, 'get_recent_bug_reports'):
+                        try:
+                            bug_reports = self.tool_registry.get_recent_bug_reports(3)  # Get last 3 reports
+                            if bug_reports and bug_reports[0] != "No bug reports yet":
+                                recent_bug_reports = "\nRecent bug reports:\n" + "\n".join(bug_reports)
+                        except Exception as e:
+                            logger.warning(f"Error getting bug reports: {e}")
+                    
+                    # Only show ego thoughts in the first iteration
+                    current_ego_thoughts = formatted_ego_thoughts if show_ego_thoughts_this_iteration else ""
+                    
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
                         emotional_state=context.get("emotional_state", {}),
                         recent_memories=recent_memories if recent_memories else "None",
                         subconscious_thoughts=context.get("subconscious_thoughts", []),
                         stimuli=context.get("stimuli", {}),
                         current_focus=context.get("current_focus"),
-                        available_tools=available_tools_text + journal_context,
+                        available_tools=available_tools_text + journal_context + recent_bug_reports,  # Add bug reports to available tools
                         recent_tools=recent_tools_text,
                         recent_results=recent_results_text,
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
                         generation_stats=generation_stats,
-                        ego_thoughts=formatted_ego_thoughts,
+                        ego_thoughts=current_ego_thoughts,
                         pending_messages=pending_messages
                     )
                 else:
+                    # Get recent bug reports if available
+                    recent_bug_reports = ""
+                    if hasattr(self, 'tool_registry') and hasattr(self.tool_registry, 'get_recent_bug_reports'):
+                        try:
+                            bug_reports = self.tool_registry.get_recent_bug_reports(3)  # Get last 3 reports
+                            if bug_reports and bug_reports[0] != "No bug reports yet":
+                                recent_bug_reports = "\nRecent bug reports:\n" + "\n".join(bug_reports)
+                        except Exception as e:
+                            logger.warning(f"Error getting bug reports: {e}")
+                    
+                    # Only show ego thoughts in the first iteration
+                    current_ego_thoughts = formatted_ego_thoughts if show_ego_thoughts_this_iteration else ""
+                    
                     prompt = THOUGHT_PROMPT_TEMPLATE.format(
                         emotional_state=context.get("emotional_state", {}),
                         recent_memories=recent_memories if recent_memories else "None",
                         subconscious_thoughts=context.get("subconscious_thoughts", []),
                         stimuli=context.get("stimuli", {}),
                         current_focus=context.get("current_focus"),
-                        available_tools=available_tools_text + journal_context,
+                        available_tools=available_tools_text + journal_context + recent_bug_reports,  # Add bug reports
                         recent_tools=recent_tools_text,
                         recent_results=recent_results_text,
                         short_term_goals=short_term_goals,
                         long_term_goal=long_term_goal,
                         generation_stats=generation_stats,
-                        ego_thoughts=formatted_ego_thoughts,
+                        ego_thoughts=current_ego_thoughts,
                         pending_messages=pending_messages
                     )
+                
+                # After the first iteration, don't show ego thoughts anymore
+                show_ego_thoughts_this_iteration = False
                 
                 # Generate the response
                 response = self._generate_completion(prompt, AGENT_SYSTEM_INSTRUCTIONS)
@@ -1712,8 +2209,22 @@ class LLMInterface:
                 "previous_ego_thoughts": intermediate_ego_thoughts
             })
             
+            # Create Langfuse span for final ego thoughts generation
+            final_ego_span = trace.span(name="final-ego-thoughts")
+            
             new_ego_thoughts = self._generate_ego_thoughts(updated_context)
             logger.info(f"Generated new ego thoughts: {new_ego_thoughts[:100]}...")
+            
+            # Update Langfuse span with the generated ego thoughts
+            final_ego_span.update(
+                output=new_ego_thoughts[:200],
+                metadata={
+                    "ego_thoughts_length": len(new_ego_thoughts),
+                    "previous_ego_thoughts_length": len(intermediate_ego_thoughts) if intermediate_ego_thoughts else 0,
+                    "generation_counter": self.generation_counter
+                }
+            )
+            final_ego_span.end()
             
             # End the trace with full results
             trace.update(
@@ -1731,7 +2242,10 @@ class LLMInterface:
             
             # Store the ego thoughts for the next cycle
             if hasattr(self.agent, 'mind') and hasattr(self.agent.mind, 'conscious'):
-                self.agent.mind.conscious.ego_thoughts = new_ego_thoughts
+                # Mark as processed to prevent re-formatting in future cycles
+                processed_ego_marker = "[PROCESSED]"
+                self.agent.mind.conscious.ego_thoughts = f"{processed_ego_marker}{new_ego_thoughts}"
+                logger.info("Marked final ego thoughts as processed")
                 
                 # Also add ego thoughts to short-term memory
                 if hasattr(self.agent.mind, 'memory'):
@@ -1749,6 +2263,16 @@ class LLMInterface:
                 memory_entry = f"[FINAL THOUGHT]: {current_response}"
                 self.agent.mind.memory.short_term.append(memory_entry)
                 logger.info(f"Added final thought response to short-term memory")
+            
+            # Add thought to the summary database for summarization
+            if hasattr(self.agent, 'thought_summary_manager'):
+                # Check if the thought contains content (not just tool invocations)
+                # We want to include thoughts that contain tool invocations as part of reasoning
+                if len(current_response) > 100:
+                    self.agent.thought_summary_manager.add_thought(current_response, thought_type="normal_thought")
+                    logger.info(f"Added thought to summary database, length: {len(current_response)}")
+                else:
+                    logger.info("Skipping short thought from summary database")
             
             return current_response, new_ego_thoughts
             
@@ -2052,8 +2576,28 @@ class LLMInterface:
             
             # Check for previous ego thoughts
             previous_ego_thoughts = context.get("previous_ego_thoughts", "")
+            # Check if ego_thoughts is also in context (could cause duplication)
+            existing_ego_thoughts = context.get("ego_thoughts", "")
+            
+            # Debug logging for ego thoughts sources
+            logger.info(f"Previous ego thoughts length: {len(previous_ego_thoughts)} chars")
+            logger.info(f"Existing ego thoughts length: {len(existing_ego_thoughts)} chars")
+            
+            # If both are present, log a warning as this could indicate duplication
+            if previous_ego_thoughts and existing_ego_thoughts:
+                logger.warning("Both previous_ego_thoughts and ego_thoughts found in context - potential duplication risk")
+                
+                # Check if they're identical
+                if previous_ego_thoughts == existing_ego_thoughts:
+                    logger.warning("Duplicate detected: previous_ego_thoughts and ego_thoughts are identical")
+                
+            # Always prefer previous_ego_thoughts if available
             if previous_ego_thoughts:
                 logger.info(f"Found previous ego thoughts: {previous_ego_thoughts[:100]}...")
+            elif existing_ego_thoughts:
+                # If no previous_ego_thoughts but ego_thoughts exists, use that instead
+                previous_ego_thoughts = existing_ego_thoughts
+                logger.info(f"Using existing ego_thoughts as previous: {previous_ego_thoughts[:100]}...")
             
             emotional_state = context.get("emotional_state", {})
             
@@ -2160,6 +2704,16 @@ class LLMInterface:
                 recent_memories.append(f"[MOST RECENT THOUGHT]: {recent_response}")
             
             # Format the prompt with all the information
+            # Get recent bug reports if available
+            recent_bug_reports = ""
+            if hasattr(self, 'tool_registry') and hasattr(self.tool_registry, 'get_recent_bug_reports'):
+                try:
+                    bug_reports = self.tool_registry.get_recent_bug_reports(3)  # Get last 3 reports
+                    if bug_reports and bug_reports[0] != "No bug reports yet":
+                        recent_bug_reports = "\nRecent bug reports:\n" + "\n".join(bug_reports)
+                except Exception as e:
+                    logger.warning(f"Error getting bug reports for ego thoughts: {e}")
+            
             ego_prompt = THOUGHT_PROMPT_TEMPLATE.format(
                 emotional_state=emotional_state,
                 recent_memories=recent_memories if recent_memories else "None",
@@ -2169,7 +2723,7 @@ class LLMInterface:
                 short_term_goals=short_term_goals,
                 long_term_goal=long_term_goal,
                 generation_stats=generation_stats,
-                available_tools=available_tools_text,
+                available_tools=available_tools_text + recent_bug_reports,
                 recent_tools=recent_tools_text,
                 recent_results=recent_results_text,
                 ego_thoughts="",
@@ -2190,6 +2744,50 @@ class LLMInterface:
         except Exception as e:
             logger.error(f"Error generating ego thoughts: {e}", exc_info=True)
             return ""
+
+    def _recall_research_memories(self, query=None, count=3):
+        """Recall memories specifically from research"""
+        try:
+            # Convert count to integer if it's a string
+            if isinstance(count, str):
+                try:
+                    count = int(count)
+                except ValueError:
+                    count = 3
+                    
+            # Get research memories
+            memories = self.mind.memory.recall_research(query, count)
+            
+            if not memories:
+                if query:
+                    return {
+                        "success": True,
+                        "output": f"No research memories found related to '{query}'. Try using [TOOL: deepdive_research(query:{query})] to perform research on this topic."
+                    }
+                else:
+                    return {
+                        "success": True,
+                        "output": "No research memories found. Try using [TOOL: deepdive_research(query:your topic)] to perform research."
+                    }
+                    
+            # Format the result
+            result = "Research memories:\n\n"
+            for i, memory in enumerate(memories, 1):
+                result += f"{i}. {memory}\n\n"
+                
+            result += "To perform new research, use: [TOOL: deepdive_research(query:your topic)]"
+            
+            return {
+                "success": True,
+                "output": result
+            }
+            
+        except Exception as e:
+            logger.error(f"Error recalling research memories: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to recall research memories: {str(e)}"
+            }
 
 def test_connection(url=API_BASE_URL):
     """Test the connection to the API endpoint"""
@@ -2297,3 +2895,617 @@ def update_llm_config(new_config):
     global LLM_CONFIG
     LLM_CONFIG.update(new_config)
     logger.info(f"LLM configuration updated: {LLM_CONFIG}")
+
+class ProcessingManager:
+    def __init__(self, agent):
+        self.agent = agent
+        self.stimuli_queue = queue.Queue()
+        self.processed_stimuli_queue = queue.Queue()  # Queue for processed stimuli
+        self.current_cycle_type = None
+        # Modified cycle sequence to make ego cycles less frequent
+        # Pattern: stimuli, normal, normal, normal, ego, emotion
+        self.cycle_types = ['stimuli', 'normal', 'normal', 'normal', 'ego', 'emotion'] 
+        self.cycle_index = 0
+        self.last_cycle_results = {}
+        
+    def add_stimuli(self, stimuli):
+        """Add raw stimuli to the queue for processing"""
+        self.stimuli_queue.put(stimuli)
+        
+    def next_cycle(self):
+        """Run the next processing cycle"""
+        # Determine cycle type
+        cycle_type = self.cycle_types[self.cycle_index]
+        self.cycle_index = (self.cycle_index + 1) % len(self.cycle_types)
+        
+        # Run the appropriate cycle
+        if cycle_type == 'stimuli':
+            return self._run_stimuli_cycle()
+        elif cycle_type == 'normal':
+            return self._run_normal_cycle()
+        elif cycle_type == 'ego':
+            return self._run_ego_cycle()
+        elif cycle_type == 'emotion':
+            return self._run_emotion_cycle()
+            
+    def _run_stimuli_cycle(self):
+        """Process raw stimuli and generate interpreted stimuli"""
+        # Collect raw stimuli
+        raw_stimuli = {}
+        while not self.stimuli_queue.empty():
+            try:
+                raw_stimuli.update(self.stimuli_queue.get_nowait())
+            except queue.Empty:
+                break
+                
+        # If no stimuli, skip processing
+        if not raw_stimuli:
+            return {
+                "cycle_type": "stimuli",
+                "result": "No stimuli to process"
+            }
+            
+        # Prepare context for stimuli interpretation
+        context = {
+            "raw_stimuli": raw_stimuli,
+            "emotional_state": self.agent.mind.emotion_center.get_state(),
+            "current_focus": self.agent.mind.conscious.current_focus,
+            "recent_memories": list(self.agent.mind.memory.short_term)[-3:]
+        }
+        
+        # Generate interpretation of stimuli using LLM
+        system_message = "You are an AI agent's perception system. Analyze and interpret incoming stimuli."
+        
+        prompt = f"""
+        You have received the following raw stimuli:
+        {json.dumps(raw_stimuli, indent=2)}
+        
+        Based on your current context, interpret these stimuli to extract:
+        1. Meaningful information and observations
+        2. Potential significance or implications
+        3. Priority level (low, medium, high)
+        
+        Your current emotional state is:
+        {json.dumps(context['emotional_state'], indent=2)}
+        
+        Your current focus is: {context['current_focus'] or 'None'}
+        
+        Format your response as a JSON object with the following structure:
+        {{
+            "interpreted_stimuli": [
+                {{
+                    "source": "source of the stimuli",
+                    "observation": "what you observe",
+                    "significance": "potential significance",
+                    "priority": "low|medium|high"
+                }}
+            ],
+            "attention_focus": "what aspect deserves focus",
+            "thought_implications": "initial thoughts prompted by these stimuli"
+        }}
+        """
+        
+        # Generate interpretation
+        try:
+            interpreted_result = self.agent.llm._generate_completion(prompt, system_message)
+            
+            # Parse the result
+            try:
+                interpreted_data = json.loads(interpreted_result)
+            except:
+                # Fallback if JSON parsing fails
+                interpreted_data = {
+                    "interpreted_stimuli": [
+                        {
+                            "source": "unknown",
+                            "observation": "Failed to parse stimuli",
+                            "significance": "unknown",
+                            "priority": "low"
+                        }
+                    ],
+                    "attention_focus": "error recovery",
+                    "thought_implications": "Need to improve stimuli processing"
+                }
+            
+            # Increment thinking cycle counter for memory tracking
+            self.agent.mind.memory.increment_cycle()
+                
+            # Store the interpretation as a memory with appropriate metadata
+            memory_id = self.agent.mind.memory.add_thought(
+                content=json.dumps(interpreted_data, indent=2),
+                thought_type="stimuli_interpretation",
+                emotional_context=self.agent.mind.emotion_center.get_state(),
+                source_stimuli=raw_stimuli
+            )
+                
+            # Add interpretation to processed stimuli queue
+            self.processed_stimuli_queue.put({
+                "raw_stimuli": raw_stimuli,
+                "interpretation": interpreted_data
+            })
+            
+            return {
+                "cycle_type": "stimuli",
+                "raw_stimuli": raw_stimuli,
+                "interpreted_stimuli": interpreted_data,
+                "memory_id": memory_id
+            }
+        except Exception as e:
+            logger.error(f"Error processing stimuli: {e}")
+            
+            # Add minimal processed data even on error
+            self.processed_stimuli_queue.put({
+                "raw_stimuli": raw_stimuli,
+                "interpretation": {
+                    "error": str(e),
+                    "interpreted_stimuli": [
+                        {
+                            "source": "unknown",
+                            "observation": f"Error processing: {str(e)}",
+                            "significance": "system error",
+                            "priority": "medium"
+                        }
+                    ]
+                }
+            })
+            
+            return {
+                "cycle_type": "stimuli",
+                "error": str(e),
+                "raw_stimuli": raw_stimuli
+            }
+        
+    def _run_normal_cycle(self):
+        """Run a normal thinking cycle with processed stimuli"""
+        # Collect processed stimuli
+        processed_stimuli = []
+        while not self.processed_stimuli_queue.empty():
+            try:
+                processed_stimuli.append(self.processed_stimuli_queue.get_nowait())
+            except queue.Empty:
+                break
+                
+        # Run subconscious processes
+        subconscious_thoughts = self.agent.mind.subconscious.process(trace_id=None)
+        
+        # Prepare stimuli for conscious thinking
+        if processed_stimuli:
+            # Format processed stimuli for conscious thinking
+            formatted_stimuli = {
+                "processed_stimuli": processed_stimuli,
+                "high_priority_items": [
+                    item for ps in processed_stimuli 
+                    for item in ps["interpretation"].get("interpreted_stimuli", [])
+                    if item.get("priority") == "high"
+                ]
+            }
+        else:
+            formatted_stimuli = {}
+        
+        # Conscious thinking with processed stimuli
+        conscious_thought = self.agent.mind.conscious.think(
+            formatted_stimuli, subconscious_thoughts, trace_id=None
+        )
+        
+        # Extract emotional implications from the thought
+        emotional_implications = self._extract_emotional_implications(conscious_thought)
+        
+        # Update emotions based on thoughts (not raw stimuli)
+        if emotional_implications:
+            self.agent.mind.emotion_center.update(emotional_implications)
+        
+        # Decision making
+        action = self.agent.mind.conscious.decide_action(conscious_thought)
+        
+        # Increment thinking cycle counter for memory tracking
+        self.agent.mind.memory.increment_cycle()
+        
+        # Store the thought as a memory with appropriate metadata
+        memory_id = self.agent.mind.memory.add_thought(
+            content=conscious_thought,
+            thought_type="normal_thought",
+            emotional_context=self.agent.mind.emotion_center.get_state(),
+            source_stimuli=formatted_stimuli if processed_stimuli else None
+        )
+        
+        # Add thought to the summary database for later summarization
+        if hasattr(self.agent, 'thought_summary_manager'):
+            # Check if the thought contains content (not just tool invocations)
+            # We want to include thoughts that contain tool invocations as part of reasoning
+            # But avoid adding pure tool responses
+            if len(conscious_thought) > 100:
+                self.agent.thought_summary_manager.add_thought(
+                    conscious_thought, thought_type="normal_thought"
+                )
+                logger.info("Added normal thought cycle result to summary database for summarization")
+            else:
+                logger.info("Skipping short thought from summary database")
+        
+        # Clear ego thoughts after processing to prevent duplication in future cycles
+        self.agent.mind.conscious.ego_thoughts = ""
+        
+        return {
+            "cycle_type": "normal",
+            "stimuli_processed": len(processed_stimuli) > 0,
+            "emotional_state": self.agent.mind.emotion_center.get_state(),
+            "subconscious_thoughts": subconscious_thoughts,
+            "conscious_thought": conscious_thought,
+            "emotional_implications": emotional_implications,
+            "action": action,
+            "memory_id": memory_id
+        }
+        
+    def _run_ego_cycle(self):
+        """Run an ego-focused cycle"""
+        # Create a Langfuse trace for the ego cycle
+        ego_cycle_trace = langfuse.trace(
+            name="ego-cycle",
+            metadata={
+                "cycle_type": "ego",
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+        # Log current state of ego thoughts
+        current_ego_thoughts = self.agent.mind.conscious.ego_thoughts
+        logger.info(f"Before ego cycle - Current ego_thoughts length: {len(current_ego_thoughts)} chars")
+        
+        # Check if ego thoughts have already been processed
+        processed_ego_marker = "[PROCESSED]"
+        if current_ego_thoughts and processed_ego_marker in current_ego_thoughts:
+            # Remove the processed marker to get the original thoughts
+            current_ego_thoughts = current_ego_thoughts.replace(processed_ego_marker, "")
+            logger.info("Removed [PROCESSED] marker from ego thoughts")
+        
+        # Prepare context for ego thoughts
+        context = {
+            "emotional_state": self.agent.mind.emotion_center.get_state(),
+            "short_term_memory": self.agent.mind.memory.recall(
+                self.agent.mind.emotion_center.get_state(), n=5
+            ),
+            "recent_processed_stimuli": []
+        }
+        
+        # Include the current ego_thoughts as previous_ego_thoughts to avoid duplication
+        # This helps the LLM know what's already been generated
+        if current_ego_thoughts:
+            context["previous_ego_thoughts"] = current_ego_thoughts
+            # Do NOT include ego_thoughts again to avoid duplication
+        
+        # Include recent processed stimuli in ego context
+        try:
+            while not self.processed_stimuli_queue.empty():
+                context["recent_processed_stimuli"].append(self.processed_stimuli_queue.get(block=False))
+        except queue.Empty:
+            pass
+        
+        # Update Langfuse with context information
+        ego_cycle_trace.update(
+            input=json.dumps({
+                "previous_ego_thoughts_length": len(current_ego_thoughts) if current_ego_thoughts else 0,
+                "memory_count": len(context.get("short_term_memory", [])),
+                "stimuli_count": len(context.get("recent_processed_stimuli", []))
+            })
+        )
+        
+        # Generate ego thoughts directly
+        ego_thoughts = self.agent.llm._generate_ego_thoughts(context)
+        
+        # Store ego thoughts for next normal cycle
+        # Log when we update ego thoughts
+        logger.info(f"Setting ego_thoughts - New length: {len(ego_thoughts)} chars")
+        # Mark as processed to prevent re-formatting in future cycles
+        processed_ego_marker = "[PROCESSED]"
+        self.agent.mind.conscious.ego_thoughts = f"{processed_ego_marker}{ego_thoughts}"
+        logger.info("Marked ego cycle thoughts as processed")
+        
+        # Increment thinking cycle counter for memory tracking
+        self.agent.mind.memory.increment_cycle()
+        
+        # Store the ego thoughts as a memory with appropriate metadata
+        memory_id = self.agent.mind.memory.add_thought(
+            content=ego_thoughts,
+            thought_type="ego_thought",
+            emotional_context=self.agent.mind.emotion_center.get_state()
+        )
+        
+        # Update Langfuse with results
+        ego_cycle_trace.update(
+            output=ego_thoughts[:200] if ego_thoughts else "",
+            metadata={
+                "ego_thoughts_length": len(ego_thoughts) if ego_thoughts else 0,
+                "memory_id": memory_id
+            }
+        )
+        ego_cycle_trace.end()
+        
+        return {
+            "cycle_type": "ego",
+            "emotional_state": self.agent.mind.emotion_center.get_state(),
+            "ego_thoughts": ego_thoughts,
+            "memory_id": memory_id
+        }
+        
+    def _run_emotion_cycle(self):
+        """Run an emotion-focused cycle - natural decay only"""
+        # Apply natural decay of emotions over time
+        for emotion in self.agent.mind.emotion_center.emotions.values():
+            emotion.intensity *= (1 - emotion.decay_rate)
+            emotion.intensity = max(0, min(1, emotion.intensity))
+            
+        # Recalculate mood
+        emotional_state = self.agent.mind.emotion_center.get_state()
+        
+        # Calculate mood using the same formula as in the EmotionCenter class
+        emotions = self.agent.mind.emotion_center.emotions
+        positive = emotions['happiness'].intensity + emotions['surprise'].intensity * 0.5 + \
+                   emotions.get('focus', Emotion('focus')).intensity * 0.3 + \
+                   emotions.get('curiosity', Emotion('curiosity')).intensity * 0.2
+        negative = emotions['sadness'].intensity + emotions['anger'].intensity + emotions['fear'].intensity
+        mood = (positive - negative) / (positive + negative + 1e-6)
+        
+        # Update mood
+        self.agent.mind.emotion_center.mood = mood
+        
+        return {
+            "cycle_type": "emotion",
+            "emotional_state": emotional_state,
+            "mood": mood
+        }
+        
+    def _extract_emotional_implications(self, thought):
+        """Extract emotional implications from a thought using the existing logic"""
+        implications = {}
+        
+        # Use the same logic as in Conscious._extract_emotional_implications
+        if "happy" in thought.lower() or "joy" in thought.lower():
+            implications["happiness"] = 0.1
+        if "sad" in thought.lower() or "depress" in thought.lower():
+            implications["sadness"] = 0.1
+        if "angry" in thought.lower() or "frustrat" in thought.lower():
+            implications["anger"] = 0.1
+        if "afraid" in thought.lower() or "fear" in thought.lower():
+            implications["fear"] = 0.1
+        if "surprised" in thought.lower() or "unexpected" in thought.lower():
+            implications["surprise"] = 0.1
+        if "focused" in thought.lower() or "concentrat" in thought.lower():
+            implications["focus"] = 0.1
+        if "curious" in thought.lower() or "interest" in thought.lower():
+            implications["curiosity"] = 0.1
+        if "disgust" in thought.lower() or "repuls" in thought.lower():
+            implications["disgust"] = 0.1
+        if "ener" in thought.lower() or "vigor" in thought.lower():
+            implications["energy"] = 0.1
+            
+        return implications
+
+class ThoughtSummaryManager:
+    """Manages the storage and summarization of thoughts"""
+    
+    def __init__(self, db_path="thought_summaries.pkl"):
+        self.db_path = db_path
+        self.thoughts_db = self._load_db()
+        self.summary_queue = queue.Queue()
+        self.summarization_active = True
+        self.summary_thread = None
+        self.summary_available = True  # Track if summary API is available
+        
+        # Start the summarization thread
+        self.start_summarization()
+    
+    def _load_db(self):
+        """Load the database from disk or create a new one"""
+        try:
+            if os.path.exists(self.db_path):
+                with open(self.db_path, 'rb') as f:
+                    return pickle.load(f)
+            else:
+                return []
+        except Exception as e:
+            logger.error(f"Error loading thought database: {e}")
+            return []
+    
+    def _save_db(self):
+        """Save the database to disk"""
+        try:
+            with open(self.db_path, 'wb') as f:
+                pickle.dump(self.thoughts_db, f)
+        except Exception as e:
+            logger.error(f"Error saving thought database: {e}")
+    
+    def add_thought(self, thought, thought_type="normal_thought"):
+        """Add a thought to the database and queue it for summarization"""
+        if thought_type != "normal_thought":
+            # Skip ego and emotional thoughts
+            logger.info(f"Skipping non-normal thought of type {thought_type}")
+            return
+        
+        # Validate the thought
+        if not thought or len(thought) < 50:
+            logger.warning(f"Thought too short ({len(thought) if thought else 0} chars), not adding to summary database")
+            return
+        
+        # Log the thought being added
+        logger.info(f"Adding thought to summary database - Type: {thought_type}, Length: {len(thought)}")
+        logger.info(f"Thought preview: {thought[:100]}...")
+            
+        timestamp = time.time()
+        entry = {
+            "timestamp": timestamp,
+            "thought": thought,
+            "summary": None,
+            "timestamp_formatted": datetime.fromtimestamp(timestamp).isoformat()
+        }
+        
+        # Add to database
+        self.thoughts_db.append(entry)
+        self._save_db()
+        
+        # Queue for summarization
+        if self.summarization_active:
+            self.summary_queue.put(entry)
+            logger.info(f"Queued thought for summarization, queue size: {self.summary_queue.qsize()}")
+        
+        return entry
+    
+    def start_summarization(self):
+        """Start the summarization thread"""
+        if self.summary_thread is None or not self.summary_thread.is_alive():
+            self.summarization_active = True
+            self.summary_thread = threading.Thread(target=self._summarization_worker, daemon=True)
+            self.summary_thread.start()
+            logger.info("Thought summarization thread started")
+            return True
+        return False
+    
+    def stop_summarization(self):
+        """Stop the summarization thread"""
+        self.summarization_active = False
+        if self.summary_thread and self.summary_thread.is_alive():
+            logger.info("Stopping thought summarization thread")
+            return True
+        return False
+    
+    def get_summaries(self, limit=10, offset=0):
+        """Get the most recent thought summaries"""
+        sorted_entries = sorted(self.thoughts_db, key=lambda x: x["timestamp"], reverse=True)
+        return sorted_entries[offset:offset+limit]
+    
+    def get_summary_status(self):
+        """Get the status of the summarization process"""
+        return {
+            "active": self.summarization_active,
+            "api_available": self.summary_available,
+            "queue_size": self.summary_queue.qsize(),
+            "total_entries": len(self.thoughts_db),
+            "summarized_entries": sum(1 for entry in self.thoughts_db if entry.get("summary") is not None)
+        }
+    
+    def _summarize_thought(self, entry):
+        """Summarize a thought using the summary API"""
+        try:
+            # Get the template from templates.py
+            from templates import SUMMARY_TEMPLATE
+            
+            # Replace {thoughts} with the actual thought content
+            prompt = SUMMARY_TEMPLATE.replace("{thoughts}", entry["thought"])
+            
+            # Make API request to summary endpoint
+            logger.info(f"Sending request to summary API for thought {entry['timestamp_formatted']}")
+            response = requests.post(
+                f"{SUMMARY_BASE_URL}/chat/completions",
+                json={
+                    "model": "summary-model",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 300
+                },
+                timeout=60  # Increased timeout to 60 seconds
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                summary = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                # Update entry with summary
+                entry["summary"] = summary
+                
+                # Mark API as available
+                self.summary_available = True
+                logger.info(f"Successfully summarized thought: {summary[:50]}...")
+                
+                # Save the updated database
+                self._save_db()
+                return True
+            else:
+                logger.error(f"Failed to summarize thought: {response.status_code}, {response.text}")
+                if response.status_code in (500, 502, 503, 504):
+                    # Mark API as unavailable on server errors
+                    self.summary_available = False
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Summary API error: {e}")
+            self.summary_available = False
+            return False
+        except Exception as e:
+            logger.error(f"Error summarizing thought: {e}")
+            return False
+    
+    def _summarization_worker(self):
+        """Worker thread for processing the summary queue"""
+        while self.summarization_active:
+            try:
+                # If API is not available, wait before retrying
+                if not self.summary_available:
+                    logger.warning("Summary API not available, pausing summarization")
+                    time.sleep(30)  # Wait 30 seconds before checking again
+                    continue
+                
+                # Get next entry from queue
+                entry = self.summary_queue.get(block=True, timeout=1)
+                
+                # Skip if already summarized
+                if entry.get("summary") is not None:
+                    self.summary_queue.task_done()
+                    continue
+                
+                # Summarize the thought synchronously
+                logger.info(f"Processing thought from {entry['timestamp_formatted']} for summarization")
+                success = self._summarize_thought(entry)
+                
+                # If unsuccessful and API is available, re-queue with backoff
+                if not success and self.summary_available:
+                    logger.warning("Failed to summarize thought, will retry later")
+                    time.sleep(5)  # Short delay before re-queuing
+                    self.summary_queue.put(entry)
+                
+                self.summary_queue.task_done()
+                
+            except queue.Empty:
+                # No items in queue, just continue
+                pass
+            except Exception as e:
+                logger.error(f"Error in summarization worker: {e}")
+                time.sleep(5)  # Delay before next iteration on error
+                
+        logger.info("Summarization worker stopped")
+
+    def force_summarize_all(self):
+        """Force immediate summarization of all thoughts in the queue"""
+        logger.info(f"Forcing summarization of {self.summary_queue.qsize()} pending thoughts")
+        
+        # Process all thoughts in the queue synchronously
+        processed_count = 0
+        failed_count = 0
+        
+        # Make a copy of the queue to avoid concurrent modification
+        thoughts_to_process = []
+        while not self.summary_queue.empty():
+            try:
+                thoughts_to_process.append(self.summary_queue.get(block=False))
+                self.summary_queue.task_done()
+            except queue.Empty:
+                break
+        
+        # Process all thoughts
+        for entry in thoughts_to_process:
+            # Skip if already summarized
+            if entry.get("summary") is not None:
+                continue
+                
+            logger.info(f"Force summarizing thought from {entry['timestamp_formatted']}")
+            success = self._summarize_thought(entry)
+            
+            if success:
+                processed_count += 1
+            else:
+                failed_count += 1
+                # Put back in queue for later processing
+                self.summary_queue.put(entry)
+        
+        return {
+            "processed": processed_count,
+            "failed": failed_count,
+            "remaining": self.summary_queue.qsize()
+        }
