@@ -2,12 +2,18 @@ from fastapi import FastAPI, Query, HTTPException, BackgroundTasks, UploadFile
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
 import uvicorn
-from model import *
+from config import logger, update_llm_config, LLM_CONFIG, MEMORY_PATH, EMOTION_PATH, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, STATE_DIR
+from agent import Agent
+from agent.motivation.task import Task
 import time
 import threading
-import json
 import os
+import random
 from datetime import datetime
+from simulation import SimulationController
+from managers.processing_manager import ProcessingManager
+from managers.thought_summary_manager import ThoughtSummaryManager
+from services.llm_interface import LLMInterface
 
 app = FastAPI(
     title="Agent Simulation API",
@@ -15,7 +21,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Global variables to manage simulation state
 simulation = None
 agent = None
 simulation_thread = None
@@ -25,8 +30,11 @@ stop_event = threading.Event()
 processing_manager = None
 
 class SimulationConfig(BaseModel):
-    memory_path: Optional[str] = "agent_memory.pkl"
+    memory_path: Optional[str] = os.path.join(STATE_DIR, "agent_memory.pkl")
+    emotion_path: Optional[str] = os.path.join(STATE_DIR, "emotion_state.pkl")
     initial_tasks: Optional[List[str]] = ["Meditate on existence", "Explore emotional state"]
+    TELEGRAM_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
 
 class MemoryQuery(BaseModel):
     query: Optional[str] = None
@@ -131,7 +139,13 @@ async def start_simulation(config: SimulationConfig, background_tasks: Backgroun
     
     # Initialize components
     llm = LLMInterface()
-    agent = Agent(llm, config.memory_path)
+    agent = Agent(
+        llm=llm, 
+        memory_path=config.memory_path,
+        emotion_path=config.emotion_path,
+        telegram_token=config.TELEGRAM_TOKEN,
+        telegram_chat_id=config.TELEGRAM_CHAT_ID
+    )
     simulation = SimulationController(agent)
     
     # Make sure thought summary manager is initialized
@@ -292,8 +306,6 @@ async def adjust_emotion(
 
 @app.post("/config/llm")
 async def update_llm_configuration(config_update: LLMConfigUpdate):
-    from model import update_llm_config, LLM_CONFIG
-    
     # Filter out None values
     updates = {k: v for k, v in config_update.dict().items() if v is not None}
     

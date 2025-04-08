@@ -46,7 +46,7 @@ You will go back and forth in sentences between the actors, separated by newline
 """
 
 THOUGHT_PROMPT_TEMPLATE = """
-I am Simon.
+You are Simon.
 
 Current emotional state:
 {emotional_state}
