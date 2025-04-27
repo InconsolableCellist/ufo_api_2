@@ -77,12 +77,20 @@ class Agent:
         # Physical state affects emotions and vice versa
         emotions = self.mind.emotion_center.get_state()
         self.physical_state["energy"] -= 0.01  # Base energy drain
-        self.physical_state["energy"] += emotions["energy"] * 0.05
+        
+        # Safely get energy value with a default of 0
+        energy_value = emotions.get("energy", 0)
+        if isinstance(energy_value, dict) and "intensity" in energy_value:
+            # Handle case where get_state returns objects with intensity
+            energy_value = energy_value["intensity"]
+            
+        self.physical_state["energy"] += energy_value * 0.05
         self.physical_state["energy"] = max(0, min(1, self.physical_state["energy"]))
         
         # If very low energy, increase desire to rest
         if self.physical_state["energy"] < 0.2:
-            self.mind.emotion_center.emotions["energy"].intensity += 0.1
+            if "energy" in self.mind.emotion_center.emotions:
+                self.mind.emotion_center.emotions["energy"].intensity += 0.1
 
     def invoke_tool(self, tool_name, **params):
         """Allow the agent to invoke tools that can affect its state.
@@ -176,6 +184,14 @@ class Agent:
             description="Read pending messages",
             function=lambda: self._receive_telegram_messages(),
             usage_example="[TOOL: receive_telegram()]"
+        ))
+        
+        # Tool to check for new Telegram messages without reading them
+        self.llm.tool_registry.register_tool(Tool(
+            name="check_telegram",
+            description="Check if there are any unread messages without reading them",
+            function=lambda: self._check_telegram_messages(),
+            usage_example="[TOOL: check_telegram()]"
         ))
         
         # Tool to write journal entries
@@ -323,6 +339,38 @@ class Agent:
             return {
                 "success": False,
                 "output": f"Error receiving messages: {str(e)}"
+            }
+
+    def _check_telegram_messages(self):
+        """Check if there are any unread messages without reading them."""
+        if not self.telegram_bot.token:
+            return {
+                "success": False,
+                "output": "Telegram bot not configured. Cannot check messages."
+            }
+        
+        try:
+            # Check for new messages
+            new_messages = self.telegram_bot.check_new_messages()
+            
+            # Check if there are any unread messages
+            has_unread = self.telegram_bot.has_unread_messages()
+            
+            if not has_unread:
+                return {
+                    "success": True,
+                    "output": "No unread messages."
+                }
+            
+            return {
+                "success": True,
+                "output": "You have unread message(s). Use the receive_telegram tool to read them."
+            }
+        except Exception as e:
+            logger.error(f"Error checking Telegram messages: {e}", exc_info=True)
+            return {
+                "success": False,
+                "output": f"Error checking messages: {str(e)}"
             }
 
     def _write_journal_entry(self, entry=None, value=None):

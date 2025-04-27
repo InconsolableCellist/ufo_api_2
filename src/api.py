@@ -3,24 +3,20 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Union
 import uvicorn
 from config import logger, update_llm_config, LLM_CONFIG, MEMORY_PATH, EMOTION_PATH, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, STATE_DIR
-from agent import Agent
-from agent.motivation.task import Task
 import time
 import threading
 import os
 import random
 from datetime import datetime
-from simulation import SimulationController
-from managers.processing_manager import ProcessingManager
-from managers.thought_summary_manager import ThoughtSummaryManager
-from services.llm_interface import LLMInterface
 
+# Initialize FastAPI app first
 app = FastAPI(
     title="Agent Simulation API",
     description="API for controlling and monitoring an agent simulation with emotional and cognitive processes",
     version="1.0.0"
 )
 
+# Initialize global variables
 simulation = None
 agent = None
 simulation_thread = None
@@ -28,6 +24,18 @@ simulation_running = False
 simulation_results = []
 stop_event = threading.Event()
 processing_manager = None
+
+# Now import other modules 
+from services.sqlite_db import db_init, get_messages_with_summary
+# Import agent-related modules after initializing app
+from agent import Agent
+from agent.motivation.task import Task
+from simulation import SimulationController
+from managers.processing_manager import ProcessingManager
+from managers.thought_summary_manager import ThoughtSummaryManager
+from services.llm_interface import LLMInterface
+# Import these functions only where they're used to avoid circular dependencies
+# from services.sqlite_db import insert_request, update_with_response, sync_with_summary_manager
 
 class SimulationConfig(BaseModel):
     memory_path: Optional[str] = os.path.join(STATE_DIR, "agent_memory.pkl")
@@ -137,7 +145,6 @@ async def start_simulation(config: SimulationConfig, background_tasks: Backgroun
     if simulation_running:
         raise HTTPException(status_code=400, detail="Simulation is already running")
     
-    # Initialize components
     llm = LLMInterface()
     agent = Agent(
         llm=llm, 
@@ -580,6 +587,34 @@ async def get_goals():
             "long_term_goal": None
         }
 
+@app.post("/telegram/check-messages")
+async def check_telegram_messages():
+    """Check for new Telegram messages and return the count of unread messages."""
+    global agent
+    
+    if not agent:
+        raise HTTPException(status_code=400, detail="Simulation has not been started")
+    
+    if not hasattr(agent, 'telegram_bot') or not agent.telegram_bot:
+        raise HTTPException(status_code=400, detail="Telegram bot not configured")
+    
+    try:
+        # Check for new messages
+        new_messages = agent.telegram_bot.check_new_messages()
+        
+        # Get all unread messages
+        unread_messages = agent.telegram_bot.get_unread_messages()
+        
+        return {
+            "success": True,
+            "new_messages_count": len(new_messages),
+            "unread_messages_count": len(unread_messages),
+            "has_unread_messages": len(unread_messages) > 0
+        }
+    except Exception as e:
+        logger.error(f"Error checking Telegram messages: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error checking messages: {str(e)}")
+
 def process_image(image_data):
     """Process raw image data and extract features"""
     # In a real implementation, you would use a CV library or ML model
@@ -663,9 +698,57 @@ async def get_tool_history():
             "tool_history": []
         }
 
+@app.post("/thought-summaries/sync-db")
+async def sync_db_with_summary_manager():
+    """Sync unsummarized database messages with the thought summary manager."""
+    global agent
+    
+    if not agent or not hasattr(agent, 'thought_summary_manager'):
+        raise HTTPException(status_code=400, detail="ThoughtSummaryManager not initialized")
+    
+    try:
+        # Import the function only when needed
+        from services.sqlite_db import sync_with_summary_manager
+        sync_count = sync_with_summary_manager(agent.thought_summary_manager)
+        return {
+            "success": True,
+            "message": f"Synced {sync_count} messages with thought summary manager",
+            "count": sync_count
+        }
+    except Exception as e:
+        logger.error(f"Error syncing database with thought summary manager: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.get("/thought-summaries/db")
+async def get_summarized_thoughts(limit: int = 20, offset: int = 0):
+    """Get messages that have summaries from the database."""
+    try:
+        messages = get_messages_with_summary(limit, offset)
+        return {
+            "success": True,
+            "messages": messages,
+            "count": len(messages),
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logger.error(f"Error getting messages with summaries: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 # TODO: Add function to record agent messages to users
 # TODO: Add function to retrieve conversation history with pagination
 # TODO: Add function to clear conversation history
 
 if __name__ == "__main__":
+    db_init()
+    # Create a temporary ThoughtSummaryManager just to sync existing messages
+    try:
+        temp_thought_manager = ThoughtSummaryManager()
+        # Import the function only when needed
+        from services.sqlite_db import sync_with_summary_manager
+        sync_count = sync_with_summary_manager(temp_thought_manager)
+        logger.info(f"Synced {sync_count} messages with thought summary manager")
+    except Exception as e:
+        logger.error(f"Error syncing messages at startup: {e}")
+    
     uvicorn.run("api:app", host="0.0.0.0", port=8081, reload=False) 

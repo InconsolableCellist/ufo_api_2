@@ -23,9 +23,12 @@ from helpers import ColoredFormatter
 # Initialize colorama
 init(autoreset=True)
 
+
 # Define state directory
 STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state")
 os.makedirs(STATE_DIR, exist_ok=True)
+
+DB_FILE = os.path.join(STATE_DIR, "llm_messages.db")
 
 logging.basicConfig(
     level=logging.INFO,
