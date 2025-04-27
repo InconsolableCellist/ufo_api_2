@@ -2,7 +2,8 @@ import logging
 import os
 from datetime import datetime
 import pickle
-from managers import ResearchManager, GoalManager, PersonalityManager
+# Remove direct manager imports to avoid circular dependencies
+# from managers import ResearchManager, GoalManager, PersonalityManager
 from config import STATE_DIR
 
 # Configure logging
@@ -71,12 +72,16 @@ class Tool:
 class ToolRegistry:
     def __init__(self):
         self.tools = {}
-        self.llm_client = None  # Will be set later
-        self.tool_history = []  # Track last 20 tool invocations
+        self.llm_client = None 
+        self.tool_history = [] 
         self.max_history = 20
-        self.goal_manager = GoalManager()  # Add goal manager
-        self.personality_manager = PersonalityManager()  # Add personality manager
-        self.research_manager = ResearchManager()  # Add research manager
+        
+        # Use delayed imports to avoid circular dependencies
+        from managers import GoalManager, PersonalityManager, ResearchManager
+        self.goal_manager = GoalManager() 
+        self.personality_manager = PersonalityManager()  
+        self.research_manager = ResearchManager() 
+        
         self.persist_path = os.path.join(STATE_DIR, "tool_registry_state.pkl")  # Default path for persistence
         self.bug_reports_path = os.path.join(STATE_DIR, "agent_bug_reports.txt")  # Path for bug reports
         self.linux_command_history = []  # Track Linux command history
@@ -100,21 +105,17 @@ class ToolRegistry:
         tool = self.get_tool(name)
         if tool:
             result = tool.execute(**params)
-            # Add to history
             self.tool_history.append({
                 "name": name,
                 "params": params,
                 "result": result,
                 "timestamp": datetime.now().isoformat()
             })
-            # Keep only last max_history entries
             if len(self.tool_history) > self.max_history:
                 self.tool_history = self.tool_history[-self.max_history:]
-            # Save state after tool execution
             self.save_state()
             return result
         else:
-            # Tool not found, create error result and add to history
             error_result = {
                 "tool": name,
                 "success": False,
@@ -331,7 +332,7 @@ class ToolRegistry:
                 "tool": name,
                 "success": True,
                 "output": simulated_output,
-                "simulated": True  # Flag to indicate this was a simulation
+                "simulated": True
             }
             
         except Exception as e:
@@ -377,7 +378,6 @@ class ToolRegistry:
                     "error": f"Failed to complete web search: {str(e)}"
                 }
         
-        # Fallback if LLM is not available
         return {
             "success": True,
             "output": f"Simulated search results for '{query}':\n\n- This is a simulated result for '{query}'.\n- In a real implementation, this would connect to a search engine API."
@@ -757,12 +757,18 @@ class ToolRegistry:
             usage_example="[TOOL: get_personality_traits()]"
         ))
         
-        # Bug reporting tool
         self.register_tool(Tool(
             name="report_bug",
             description="Report a bug or system issue you've observed (one sentence only)",
             function=lambda report: self.report_bug(report),
             usage_example="[TOOL: report_bug(report:The ego thoughts are appearing multiple times)]"
+        ))
+
+        self.register_tool(Tool(
+            name="get_goal_stats",
+            description="Get statistics about current goals, including duration and cycles",
+            function=lambda: self.get_goal_stats(),
+            usage_example="[TOOL: get_goal_stats()]"
         ))
         
         logger.info("Registered all default tools")

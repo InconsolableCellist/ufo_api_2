@@ -19,6 +19,8 @@ The AI agent is designed with a layered cognitive architecture inspired by human
 
 ## Screenshots
 
+I wrote the following two tools to help me understand what the AI is doing, as otherwise it's just a bunch of output in Langfuse.
+
 ### Memory Browser
 ![Memory Browser](images/memory_browser.jpg)
 
@@ -37,6 +39,10 @@ The AI agent is designed with a layered cognitive architecture inspired by human
 ### Thought Summaries
 ![Thought Summaries](images/thought_summaries.jpg)
 
+### Python Viewer
+
+![Agent Viewer](images/agent_viewer_1.jpg)
+![Agent Viewer](images/agent_viewer_2.jpg)
 ## Architecture Documentation
 
 The `/sequence_diagram` directory contains detailed PlantUML sequence diagrams illustrating the agent's execution flow:

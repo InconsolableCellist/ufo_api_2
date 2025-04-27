@@ -10,6 +10,8 @@ import json
 import requests
 from datetime import datetime
 from config import STATE_DIR
+# Remove the direct imports to break circular dependency
+# from services.sqlite_db import update_with_summary, get_messages_without_summary
 
 logger = logging.getLogger('agent_simulation.managers.thought_summary')
 
@@ -62,12 +64,13 @@ class ThoughtSummaryManager:
         except Exception as e:
             logger.error(f"Error saving thought database: {e}")
     
-    def add_thought(self, thought, thought_type="normal_thought"):
+    def add_thought(self, thought, thought_type="normal_thought", request_id=None):
         """Add a thought to the database and queue it for summarization.
         
         Args:
             thought (str): The thought content to add
             thought_type (str): Type of thought (e.g., "normal_thought", "ego_thought")
+            request_id (str, optional): The request ID for updating SQLite DB
             
         Returns:
             dict: The created thought entry
@@ -91,7 +94,8 @@ class ThoughtSummaryManager:
             "timestamp": timestamp,
             "thought": thought,
             "summary": None,
-            "timestamp_formatted": datetime.fromtimestamp(timestamp).isoformat()
+            "timestamp_formatted": datetime.fromtimestamp(timestamp).isoformat(),
+            "request_id": request_id  # Store the request_id for direct DB updates
         }
         
         # Add to database
@@ -193,6 +197,29 @@ class ThoughtSummaryManager:
                 
                 # Update entry with summary
                 entry["summary"] = summary
+                
+                # If we have a request_id, update the SQLite database directly
+                if entry.get("request_id"):
+                    try:
+                        # Delay import to avoid circular dependency
+                        from services.sqlite_db import update_with_summary
+                        logger.info(f"Updating SQLite DB with summary for request_id: {entry['request_id']}")
+                        update_with_summary(entry["request_id"], summary)
+                    except Exception as e:
+                        logger.error(f"Error updating SQLite database with summary: {e}")
+                else:
+                    # Fallback to content matching for older entries without request_id
+                    try:
+                        # Delay import to avoid circular dependency
+                        from services.sqlite_db import get_messages_without_summary, update_with_summary
+                        unsummarized_messages = get_messages_without_summary()
+                        for request_id, response_text in unsummarized_messages:
+                            if response_text and entry["thought"] in response_text:
+                                logger.info(f"Found matching content for request_id: {request_id}")
+                                update_with_summary(request_id, summary)
+                                break
+                    except Exception as e:
+                        logger.error(f"Error updating SQLite database with summary using content matching: {e}")
                 
                 # Mark API as available
                 self.summary_available = True
