@@ -53,6 +53,11 @@ SUMMARY_HOST = "mlboy"
 SUMMARY_PORT = "5000"
 SUMMARY_BASE_URL = f"http://{SUMMARY_HOST}:{SUMMARY_PORT}/v1"
 
+# Emotion LLM Configuration
+EMOTION_LLM_HOST = "mlboy"  # Same default as summary service
+EMOTION_LLM_PORT = "5000"
+EMOTION_LLM_BASE_URL = f"http://{EMOTION_LLM_HOST}:{EMOTION_LLM_PORT}/v1"
+
 # Langfuse Configuration
 os.environ["LANGFUSE_HOST"] = "http://zen:3000"
 os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-c039333b-d33f-44a5-a33c-5827e783f4b2"
@@ -69,8 +74,7 @@ LLM_CONFIG = {
     "temperature": 1.75,
     "use_openrouter": False,  # Set to False to use local API
     "api_base": "https://openrouter.ai/api/v1",  # OpenRouter API endpoint
-    #"api_key": "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",
-    "api_key": "d10b4db7e9368401cd87ba6bea5ac072",
+    "api_key": "derp",
     "local_api_base": API_BASE_URL,  # Local API endpoint
     "local_model": "local-model"  # Model name for local API
 }
