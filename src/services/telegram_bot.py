@@ -4,6 +4,7 @@ import os
 import json
 import logging
 from datetime import datetime
+from config import STATE_DIR
 
 logger = logging.getLogger('agent_simulation.services.telegram')
 
@@ -22,7 +23,7 @@ class TelegramBot:
         self.bot = None
         self.last_message_time = None  # Track when the last message was sent
         self.rate_limit_seconds = 3600  # 1 hour in seconds
-        self.messages_file = "telegram_messages.json"
+        self.messages_file = os.path.join(STATE_DIR, "telegram_messages.json")
         self.last_update_id = 0  # To keep track of processed messages
         
         if self.token:
@@ -67,7 +68,15 @@ class TelegramBot:
                 return False
         
         try:
-            self.bot.send_message(chat_id=self.chat_id, text=message)
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            # Run the coroutine to send the message
+            loop.run_until_complete(self.bot.send_message(chat_id=self.chat_id, text=message))
+            
             self.last_message_time = current_time  # Update the last message time
             logger.info(f"Telegram message sent: {message[:30]}...")
             return True
@@ -134,8 +143,35 @@ class TelegramBot:
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                # Run the coroutine to get updates
-                updates = loop.run_until_complete(self.bot.get_updates(offset=self.last_update_id + 1, timeout=5))
+                
+                # Check if we're already in an event loop
+                if loop.is_running():
+                    # If we're already in an event loop, use a different approach
+                    # Create a future to run the coroutine
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.bot.get_updates(offset=self.last_update_id + 1, timeout=5),
+                        loop
+                    )
+                    # Wait for the result with a timeout
+                    try:
+                        updates = future.result(timeout=30)  
+                    except TimeoutError:
+                        logger.warning("Timeout waiting for Telegram updates. This may be due to network issues or the Telegram API being slow.")
+                        # Cancel the future to avoid resource leaks
+                        future.cancel()
+                        return []
+                else:
+                    # Run the coroutine to get updates
+                    try:
+                        updates = loop.run_until_complete(
+                            asyncio.wait_for(
+                                self.bot.get_updates(offset=self.last_update_id + 1, timeout=5),
+                                timeout=15  # Increased timeout to 15 seconds
+                            )
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("Timeout waiting for Telegram updates. This may be due to network issues or the Telegram API being slow.")
+                        return []
             except (ImportError, AttributeError):
                 # Fall back to synchronous behavior for older versions
                 updates = self.bot.get_updates(offset=self.last_update_id + 1, timeout=5)
@@ -182,10 +218,32 @@ class TelegramBot:
                 self._save_message_state(all_messages)
                 
             return new_messages
-            
         except Exception as e:
-            logger.error(f"Error checking for new messages: {e}")
+            logger.error(f"Error checking for new messages: {e}", exc_info=True)
             return []
+            
+    def has_unread_messages(self):
+        """Check if there are any unread messages without marking them as read.
+        
+        Returns:
+            bool: True if there are unread messages, False otherwise
+        """
+        if not self.bot:
+            logger.warning("Telegram bot not configured. Cannot check messages.")
+            return False
+            
+        try:
+            # First check for any new messages
+            self.check_new_messages()
+            
+            # Then check if there are any unread messages
+            messages = self._get_saved_messages()
+            unread = [m for m in messages if not m.get("read", False)]
+            
+            return len(unread) > 0
+        except Exception as e:
+            logger.error(f"Error checking for unread messages: {e}")
+            return False
             
     def _get_saved_messages(self):
         """Get saved messages from the state file (internal method).

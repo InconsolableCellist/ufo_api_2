@@ -44,7 +44,7 @@ logger = logging.getLogger('agent_simulation')
 logger.addHandler(console_handler)
 
 # API Configuration
-API_HOST = "bestiary"
+API_HOST = "cube"
 API_PORT = "5000"
 API_BASE_URL = f"http://{API_HOST}:{API_PORT}/v1"
 
@@ -61,15 +61,20 @@ langfuse = Langfuse()
 
 # LLM Configuration
 EMBEDDING_MODEL = "text-embedding-ada-002"
-COMPLETION_MODEL = "local-model"
+COMPLETION_MODEL = "qwen/qwen3-235b-a22b:free"
 
 LLM_CONFIG = {
     "model": COMPLETION_MODEL,
     "max_tokens": 750,
     "temperature": 1.75,
+    "use_openrouter": False,  # Set to False to use local API
+    "api_base": "https://openrouter.ai/api/v1",  # OpenRouter API endpoint
+    #"api_key": "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",
+    "api_key": "d10b4db7e9368401cd87ba6bea5ac072",
+    "local_api_base": API_BASE_URL,  # Local API endpoint
+    "local_model": "local-model"  # Model name for local API
 }
 
-# File paths with state directory
 MEMORY_PATH = os.path.join(STATE_DIR, "agent_memory.pkl")
 EMOTION_PATH = os.path.join(STATE_DIR, "emotion_state.pkl")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")

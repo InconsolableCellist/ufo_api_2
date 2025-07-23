@@ -323,4 +323,27 @@ class ThoughtSummaryManager:
             "processed": processed_count,
             "failed": failed_count,
             "remaining": self.summary_queue.qsize()
-        } 
+        }
+
+    def get_recent_entries(self, limit=3):
+        """Get the most recent thought entries.
+        
+        Args:
+            limit (int): Maximum number of entries to return
+            
+        Returns:
+            list: List of recent thought entries
+        """
+        # Sort entries by timestamp in descending order
+        sorted_entries = sorted(self.thoughts_db, key=lambda x: x["timestamp"], reverse=True)
+        
+        # Get the most recent entries
+        recent_entries = sorted_entries[:limit]
+        
+        # Format entries for display
+        formatted_entries = []
+        for entry in recent_entries:
+            formatted_entry = f"[{entry['timestamp_formatted']}] {entry['thought']}"
+            formatted_entries.append(formatted_entry)
+            
+        return formatted_entries 

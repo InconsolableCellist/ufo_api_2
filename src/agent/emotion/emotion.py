@@ -68,6 +68,14 @@ class EmotionCenter:
         self.mood = 0.5  # Overall mood from -1 (negative) to 1 (positive)
         self.llm_client = None  # Will be set by the agent
         
+        # Cache for emotional state descriptions
+        self._emotional_state_cache = {
+            "description": None,
+            "last_emotions": None,
+            "last_mood": None,
+            "timestamp": None
+        }
+        
     def update(self, stimuli):
         """Update all emotions based on stimuli and recalculate mood.
         
@@ -120,6 +128,35 @@ class EmotionCenter:
         if not hasattr(self, 'llm_client') or self.llm_client is None:
             return emotion_values
             
+        # Check if emotional state has changed significantly
+        current_state = {
+            "emotions": emotion_values,
+            "mood": self.mood
+        }
+        
+        # If we have a cached state, check if it's still valid
+        if self._emotional_state_cache["last_emotions"] is not None:
+            # Calculate change in emotions
+            emotion_changes = {
+                name: abs(current_state["emotions"][name] - self._emotional_state_cache["last_emotions"][name])
+                for name in current_state["emotions"]
+            }
+            
+            # Check if any emotion has changed significantly (more than 0.1)
+            significant_change = any(change > 0.1 for change in emotion_changes.values())
+            
+            # Check if mood has changed significantly
+            mood_change = abs(current_state["mood"] - self._emotional_state_cache["last_mood"])
+            significant_change = significant_change or mood_change > 0.1
+            
+            if not significant_change:
+                # Return cached description if no significant changes
+                return {
+                    "raw_emotions": emotion_values,
+                    "mood": self.mood,
+                    "description": self._emotional_state_cache["description"]
+                }
+        
         # Prepare context for the LLM
         prompt = f"""
         Current emotional intensities:
@@ -138,6 +175,14 @@ class EmotionCenter:
         
         try:
             description = self.llm_client._generate_completion(prompt, system_message)
+            
+            # Update cache
+            self._emotional_state_cache = {
+                "description": description,
+                "last_emotions": emotion_values.copy(),
+                "last_mood": self.mood,
+                "timestamp": datetime.now().isoformat()
+            }
             
             return {
                 "raw_emotions": emotion_values,

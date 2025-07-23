@@ -7,10 +7,14 @@ import json
 
 from tools.tools import Tool
 from services import Journal, TelegramBot
-from managers.processing_manager import ProcessingManager
 from agent.mind import Mind
 from managers.thought_summary_manager import ThoughtSummaryManager
 from config import STATE_DIR
+from .emotion import EmotionCenter
+from .motivation import MotivationCenter
+from .cognition.subconscious import Subconscious
+from .cognition.conscious import Conscious
+from .cognition.memory import Memory
 
 logger = logging.getLogger('agent_simulation.agent')
 
@@ -36,10 +40,48 @@ class Agent:
                  journal_path=None):
         self.llm = llm
         self.llm.attach_to_agent(self)  # Connect the LLM to the agent
-        self.mind = Mind(self.llm, memory_path, emotion_path)
+        
+        # Initialize core components
+        self.memory = Memory(persist_path=memory_path)
+        self.emotion_center = EmotionCenter()
+        self.emotion_center.llm_client = llm
+        self.motivation_center = MotivationCenter()
+        
+        # Initialize processing components
+        self.subconscious = Subconscious(self.memory, self.emotion_center)
+        self.conscious = Conscious(
+            self.memory, 
+            self.emotion_center, 
+            self.subconscious,
+            llm
+        )
+        
+        # Initialize the mind with all components
+        self.mind = Mind(
+            memory=self.memory,
+            emotion_center=self.emotion_center,
+            motivation_center=self.motivation_center,
+            subconscious=self.subconscious,
+            conscious=self.conscious
+        )
+        
+        # Load emotional state if path provided
+        if emotion_path and os.path.exists(emotion_path):
+            self.mind.load_emotional_state(emotion_path)
+            
+        # Initialize physical state
         self.physical_state = {
             "energy": 1.0,
-            "fatigue": 0.0
+            "focus": 1.0,
+            "health": 1.0
+        }
+        
+        # Cache for emotional state descriptions
+        self._emotional_state_cache = {
+            "description": None,
+            "last_emotions": None,
+            "last_mood": None,
+            "timestamp": None
         }
         
         # Set default paths if not provided
@@ -58,10 +100,10 @@ class Agent:
         
         # Initialize journal and telegram bot
         self.journal = Journal(journal_path)
-        self.telegram_bot = TelegramBot(telegram_token, telegram_chat_id)
-        
-        # Initialize processing manager
-        self.processing_manager = ProcessingManager(self)
+        if telegram_token and telegram_chat_id:
+            self.telegram_bot = TelegramBot(telegram_token, telegram_chat_id)
+        else:
+            self.telegram_bot = None
         
         # Register agent-specific tools
         self._register_agent_tools()
@@ -73,25 +115,17 @@ class Agent:
         logger.info("Agent initialized successfully")
         
     def update_physical_state(self):
-        """Update the agent's physical state based on emotions and vice versa."""
-        # Physical state affects emotions and vice versa
-        emotions = self.mind.emotion_center.get_state()
-        self.physical_state["energy"] -= 0.01  # Base energy drain
+        """Update the agent's physical state based on current conditions."""
+        # Energy naturally decays over time
+        self.physical_state["energy"] = max(0, self.physical_state["energy"] - 0.01)
         
-        # Safely get energy value with a default of 0
-        energy_value = emotions.get("energy", 0)
-        if isinstance(energy_value, dict) and "intensity" in energy_value:
-            # Handle case where get_state returns objects with intensity
-            energy_value = energy_value["intensity"]
+        # Focus is affected by energy level
+        self.physical_state["focus"] = self.physical_state["energy"] * 0.8
+        
+        # Health is affected by energy and focus
+        self.physical_state["health"] = (self.physical_state["energy"] + 
+            self.physical_state["focus"]) / 2
             
-        self.physical_state["energy"] += energy_value * 0.05
-        self.physical_state["energy"] = max(0, min(1, self.physical_state["energy"]))
-        
-        # If very low energy, increase desire to rest
-        if self.physical_state["energy"] < 0.2:
-            if "energy" in self.mind.emotion_center.emotions:
-                self.mind.emotion_center.emotions["energy"].intensity += 0.1
-
     def invoke_tool(self, tool_name, **params):
         """Allow the agent to invoke tools that can affect its state.
         
@@ -102,23 +136,21 @@ class Agent:
         Returns:
             str: Result of the tool invocation
         """
+        # Handle special internal tools differently
         if tool_name == "adjust_emotion":
-            emotion_name = params.get("emotion")
-            intensity_change = params.get("change", 0)
-            
-            if emotion_name in self.mind.emotion_center.emotions:
-                emotion = self.mind.emotion_center.emotions[emotion_name]
-                emotion.intensity += intensity_change
-                emotion.intensity = max(0, min(1, emotion.intensity))
-                return f"Adjusted {emotion_name} by {intensity_change}"
-            return f"Unknown emotion: {emotion_name}"
-        
+            return self._adjust_emotion(params.get("emotion"), params.get("change", 0))
         elif tool_name == "rest":
-            self.physical_state["energy"] += params.get("amount", 0.1)
-            self.physical_state["energy"] = min(1.0, self.physical_state["energy"])
-            return "Rested and recovered some energy"
+            return self._rest(params.get("amount", 0.1))
         
-        return f"Unknown tool: {tool_name}"
+        # For regular tools, use the tool registry
+        try:
+            logger.info(f"Invoking tool '{tool_name}' with params: {params}")
+            result = self.llm.tool_registry.invoke_tool(tool_name, **params)
+            logger.info(f"Tool '{tool_name}' returned: {str(result)[:100]}...")
+            return result
+        except Exception as e:
+            logger.error(f"Error invoking tool '{tool_name}': {e}")
+            return f"Error invoking tool '{tool_name}': {str(e)}"
 
     def _register_agent_tools(self):
         """Register tools specific to this agent."""
@@ -198,7 +230,7 @@ class Agent:
         self.llm.tool_registry.register_tool(Tool(
             name="write_journal",
             description="Write an entry to the agent's journal for future reference",
-            function=lambda entry=None, text=None, message=None, value=None: self._write_journal_entry(entry or text or message or value),
+            function=lambda entry: self._write_journal_entry(entry),
             usage_example="[TOOL: write_journal(entry:Today I learned something interesting)]"
         ))
         
@@ -219,21 +251,41 @@ class Agent:
         ))
 
     def _adjust_emotion(self, emotion, change):
-        """Adjust an emotion's intensity."""
-        if emotion in self.mind.emotion_center.emotions:
-            emotion_obj = self.mind.emotion_center.emotions[emotion]
-            emotion_obj.intensity += float(change)
-            emotion_obj.intensity = max(0, min(1, emotion_obj.intensity))
-            return f"Adjusted {emotion} by {change}, new intensity: {emotion_obj.intensity:.2f}"
-        return f"Unknown emotion: {emotion}"
+        """Adjust the intensity of an emotion.
         
-    def _rest(self, amount):
-        """Rest to recover energy."""
-        amount = float(amount)
-        self.physical_state["energy"] += amount
-        self.physical_state["energy"] = min(1.0, self.physical_state["energy"])
-        return f"Rested and recovered {amount:.2f} energy. Current energy: {self.physical_state['energy']:.2f}"
+        Args:
+            emotion (str): Name of the emotion to adjust
+            change (float): Amount to change the emotion by (-1.0 to 1.0)
+            
+        Returns:
+            dict: Result of the adjustment
+        """
+        if emotion not in self.mind.emotion_center.emotions:
+            return {"error": f"Unknown emotion: {emotion}"}
+            
+        self.mind.emotion_center.emotions[emotion].intensity += change
+        self.mind.emotion_center.emotions[emotion].intensity = max(0, min(1, 
+            self.mind.emotion_center.emotions[emotion].intensity))
+            
+        return {
+            "emotion": emotion,
+            "new_intensity": self.mind.emotion_center.emotions[emotion].intensity
+        }
         
+    def _rest(self, amount=0.1):
+        """Rest to recover energy.
+        
+        Args:
+            amount (float): Amount of energy to recover (0.0 to 1.0)
+            
+        Returns:
+            dict: Result of resting
+        """
+        self.physical_state["energy"] = min(1.0, self.physical_state["energy"] + amount)
+        return {
+            "energy": self.physical_state["energy"]
+        }
+
     def _recall_memories(self, query, count):
         """Recall memories based on query or emotional state."""
         count = int(count)
@@ -242,7 +294,6 @@ class Agent:
         if query:
             logger.info(f"Recalling memories with direct query: {query}")
             memories = self.mind.memory.recall(
-                emotional_state=self.mind.emotion_center.get_state(),
                 query=query,
                 n=count
             )
@@ -250,7 +301,6 @@ class Agent:
             # If no query, fall back to emotional state only
             logger.info("Recalling memories based on emotional state only")
             memories = self.mind.memory.recall(
-                emotional_state=self.mind.emotion_center.get_state(),
                 n=count
             )
             
@@ -373,41 +423,38 @@ class Agent:
                 "output": f"Error checking messages: {str(e)}"
             }
 
-    def _write_journal_entry(self, entry=None, value=None):
+    def _write_journal_entry(self, entry):
         """Write an entry to the journal."""
         try:
-            # Use entry or value parameter, whichever is provided
-            content = entry if entry is not None else value
-            
             # Handle various input formats that might be passed in by the LLM
-            if content is None:
-                content = "Empty journal entry"
+            if entry is None:
+                entry = "Empty journal entry"
                 
             # Handle cases where entry is passed with quotes
-            if isinstance(content, str):
+            if isinstance(entry, str):
                 # Remove surrounding quotes if they exist
-                if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
-                    content = content[1:-1]
+                if (entry.startswith('"') and entry.endswith('"')) or (entry.startswith("'") and entry.endswith("'")):
+                    entry = entry[1:-1]
             
             # Convert non-string entries to string
-            if not isinstance(content, str):
-                content = str(content)
+            if not isinstance(entry, str):
+                entry = str(entry)
                 
             # Log the entry type and content for debugging
-            logger.info(f"Writing journal entry of type {type(content)}: '{content[:50]}...'")
+            logger.info(f"Writing journal entry of type {type(entry)}: '{entry[:50]}...'")
             
             # Ensure we have an entry
-            if not content.strip():
-                content = "Blank journal entry recorded at this timestamp"
+            if not entry.strip():
+                entry = "Blank journal entry recorded at this timestamp"
                 
             # Write the entry
-            success = self.journal.write_entry(content)
+            success = self.journal.write_entry(entry)
             
             if success:
-                return f"Journal entry recorded: '{content[:50]}...'" if len(content) > 50 else f"Journal entry recorded: '{content}'"
+                return f"Journal entry recorded: '{entry[:50]}...'" if len(entry) > 50 else f"Journal entry recorded: '{entry}'"
             else:
                 # If writing failed, try once more with a simplified entry
-                fallback_entry = f"Journal entry (simplified): {content[:100]}"
+                fallback_entry = f"Journal entry (simplified): {entry[:100]}"
                 fallback_success = self.journal.write_entry(fallback_entry)
                 
                 if fallback_success:
@@ -434,29 +481,10 @@ class Agent:
             
         # Get the raw emotion values
         emotion_values = self.mind.emotion_center.get_state()
-        
-        # Prepare context for the LLM
-        prompt = f"""
-        Current emotional intensities:
-        {json.dumps(emotion_values, indent=2)}
-        
-        Overall mood: {self.mind.emotion_center.mood:.2f} (-1 to 1 scale)
-        
-        Based on these emotional intensities and overall mood, provide a brief, natural description
-        of the emotional state from the agent's perspective. Focus on the dominant emotions
-        and their interplay. Keep the description to 2-3 sentences.
-        
-        Format your response as a direct first-person statement of emotional awareness.
-        """
-        
-        system_message = "You are an AI agent's emotional awareness. Describe the emotional state naturally and introspectively."
-        
-        try:
-            # Use the agent's LLM interface to generate the description
-            description = self.llm._generate_completion(prompt, system_message)
-            return description
-        except Exception as e:
-            logger.error(f"Error generating emotional state description: {e}", exc_info=True)
+
+        if 'description' in emotion_values:
+            return emotion_values['description']
+        else:
             return f"Raw emotional state: {json.dumps(emotion_values, indent=2)}"
 
     def _report_bug(self, report):
@@ -545,5 +573,9 @@ class Agent:
         # Write final journal entry
         self.journal.write_entry("Agent shutdown completed. Goodbye for now.")
         
+        # Shutdown Telegram bot if active
+        if self.telegram_bot:
+            self.telegram_bot.shutdown()
+            
         logger.info("Agent shutdown completed")
         return True 

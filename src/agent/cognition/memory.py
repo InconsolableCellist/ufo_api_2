@@ -11,14 +11,13 @@ import numpy as np
 import faiss
 from openai import OpenAI
 import requests
-from config import langfuse
+from config import langfuse, LLM_CONFIG
 
 logger = logging.getLogger('agent_simulation.cognition.memory')
 
 # Get API configuration from environment or use defaults
 API_HOST = os.getenv("API_HOST", "bestiary")
 API_PORT = os.getenv("API_PORT", "5000")
-API_BASE_URL = f"http://{API_HOST}:{API_PORT}/v1"
 EMBEDDING_MODEL = "text-embedding-ada-002"
 
 class Memory:
@@ -62,10 +61,10 @@ class Memory:
         self.embeddings = []  # Store embeddings corresponding to long_term memories
         
         # Initialize OpenAI client for embeddings
-        logger.info(f"Initializing OpenAI client with base URL: {API_BASE_URL}")
+        logger.info(f"Initializing OpenAI client with base URL: {LLM_CONFIG['local_api_base']}")
         self.client = OpenAI(
-            base_url=API_BASE_URL,
-            api_key="not-needed"
+            base_url=LLM_CONFIG['local_api_base'],
+            api_key="not-needed"  # Since it's your local endpoint
         )
         
         # Path for persistence
@@ -81,11 +80,12 @@ class Memory:
         self.thinking_cycle_count += 1
         return self.thinking_cycle_count
         
-    def get_embedding(self, text):
+    def get_embedding(self, text, is_rebuilding=False):
         """Get embedding vector for text using OpenAI API.
         
         Args:
             text (str): Text to get embedding for
+            is_rebuilding (bool): Whether this call is part of index rebuilding
             
         Returns:
             numpy.ndarray: Embedding vector
@@ -95,18 +95,18 @@ class Memory:
         """
         try:
             # Truncate text to avoid "input too large" errors
-            max_chars = 8000  # Conservative limit
-            if len(text) > max_chars:
-                logger.warning(f"Text too long for embedding ({len(text)} chars), truncating to {max_chars} chars")
-                text = text[:max_chars]
+            max_chars = 2000  # Reduced from 8000 to avoid API limits
+            if len(str(text)) > max_chars:
+                logger.warning(f"Text too long for embedding ({len(str(text))} chars), truncating to {max_chars} chars")
+                text = str(text)[:max_chars]
                 
-            logger.info(f"Requesting embedding for text: '{text[:50]}...' (truncated) of length {len(text)}")
+            logger.info(f"Requesting embedding for text: '{str(text)[:50]}...' (truncated) of length {len(str(text))}")
             
             # Create Langfuse span for tracking
             generation = langfuse.generation(
                 name="embedding-request",
                 model=EMBEDDING_MODEL,
-                input=text,
+                input=str(text),
                 metadata={
                     "base_url": self.client.base_url,
                     "timestamp": datetime.now().isoformat()
@@ -117,11 +117,11 @@ class Memory:
             headers = {"Content-Type": "application/json"}
             payload = {
                 "model": EMBEDDING_MODEL,
-                "input": text,
+                "input": str(text),
                 "encoding_format": "float"
             }
             
-            base_url = API_BASE_URL.rstrip('/')
+            base_url = LLM_CONFIG['local_api_base'].rstrip('/')
             api_url = f"{base_url}/embeddings"
             
             start_time = time.time()
@@ -156,6 +156,55 @@ class Memory:
                 self.embedding_dim = embedding.shape[0]
                 logger.info(f"Setting embedding dimension to {self.embedding_dim}")
                 self.index = faiss.IndexFlatL2(self.embedding_dim)
+            elif self.embedding_dim != embedding.shape[0] and not is_rebuilding:
+                # If we get a different dimension and we're not already rebuilding, rebuild the index
+                logger.warning(f"Embedding dimension mismatch: got {embedding.shape[0]}, expected {self.embedding_dim}")
+                logger.info("Rebuilding FAISS index with new dimension")
+                
+                # Store the new dimension
+                new_dim = embedding.shape[0]
+                
+                # Create new index with correct dimension
+                new_index = faiss.IndexFlatL2(new_dim)
+                
+                # Re-embed all existing memories with the new model
+                logger.info(f"Re-embedding {len(self.long_term)} memories with new model")
+                new_embeddings = []
+                successful_embeddings = 0
+                
+                for memory in self.long_term:
+                    try:
+                        # Skip if memory is too long
+                        if len(str(memory)) > max_chars:
+                            logger.warning(f"Skipping long memory ({len(str(memory))} chars)")
+                            continue
+                            
+                        # Get new embedding for the memory, passing is_rebuilding=True
+                        memory_embedding = self.get_embedding(memory, is_rebuilding=True)
+                        new_embeddings.append(memory_embedding)
+                        successful_embeddings += 1
+                    except Exception as e:
+                        logger.error(f"Failed to re-embed memory: {e}")
+                        continue
+                
+                if successful_embeddings > 0:
+                    # Stack and normalize the new embeddings
+                    normalized_embeddings = np.vstack(new_embeddings)
+                    faiss.normalize_L2(normalized_embeddings)
+                    
+                    # Add to new index
+                    new_index.add(normalized_embeddings)
+                    
+                    # Update class state
+                    self.embedding_dim = new_dim
+                    self.index = new_index
+                    self.embeddings = new_embeddings
+                    
+                    logger.info(f"Successfully rebuilt index with {successful_embeddings} embeddings of dimension {new_dim}")
+                else:
+                    logger.error("Failed to re-embed any memories, keeping old index")
+                    # Return the current embedding but don't update the index
+                    return embedding
                 
             return embedding
             
@@ -266,11 +315,10 @@ class Memory:
             add_prefix=True
         )
         
-    def recall(self, emotional_state, query=None, n=3, memory_type=None):
-        """Recall memories based on emotional state and/or query.
+    def recall(self, query=None, n=3, memory_type=None):
+        """Recall memories based on query.
         
         Args:
-            emotional_state (dict): Current emotional state
             query (str, optional): Query for semantic search
             n (int, optional): Number of memories to return
             memory_type (str, optional): Type of memories to recall
@@ -303,17 +351,6 @@ class Memory:
             for memory in type_results:
                 self.update_recall_stats(memory)
             return type_results
-            
-        # If no results from semantic search, try emotional matching
-        if not results and emotional_state:
-            emotional_matches = []
-            for memory in self.long_term:
-                if memory in self.associations:
-                    if self._emotional_match(self.associations[memory], emotional_state):
-                        emotional_matches.append(memory)
-                        self.update_recall_stats(memory)
-                        
-            results = emotional_matches[:n]
             
         return results
         
@@ -518,13 +555,28 @@ class Memory:
         # Rebuild FAISS index if we have embeddings
         if 'embeddings' in data and len(data['embeddings']) > 0:
             embeddings = data['embeddings']
-            self.embedding_dim = embeddings.shape[1]
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
+            # Ensure embeddings is a numpy array
+            if not isinstance(embeddings, np.ndarray):
+                embeddings = np.array(embeddings)
             
-            # Normalize and add to index
-            normalized_embeddings = embeddings.copy()
-            faiss.normalize_L2(normalized_embeddings)
-            self.index.add(normalized_embeddings)
-            
-            # Store embeddings
-            self.embeddings = [embeddings[i] for i in range(embeddings.shape[0])] 
+            # Get the embedding dimension from the first embedding
+            if len(embeddings) > 0:
+                self.embedding_dim = embeddings.shape[1]
+                logger.info(f"Setting embedding dimension to {self.embedding_dim} from loaded embeddings")
+                
+                # Initialize FAISS index with the correct dimension
+                self.index = faiss.IndexFlatL2(self.embedding_dim)
+                
+                # Normalize and add to index
+                normalized_embeddings = embeddings.copy()
+                faiss.normalize_L2(normalized_embeddings)
+                self.index.add(normalized_embeddings)
+                
+                # Store embeddings
+                self.embeddings = [embeddings[i] for i in range(embeddings.shape[0])]
+                logger.info(f"Successfully loaded {len(self.embeddings)} embeddings into FAISS index")
+            else:
+                logger.warning("No embeddings found in loaded data")
+                self.embeddings = []
+                self.index = None
+                self.embedding_dim = None 

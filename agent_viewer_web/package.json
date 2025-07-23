@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "A modern web-based viewer for the agent simulation",
   "private": true,
-  "proxy": "http://bestiary:8081",
+  "proxy": "http://cube:8081",
   "dependencies": {
     "@emotion/react": "^11.11.0",
     "@emotion/styled": "^11.11.0",

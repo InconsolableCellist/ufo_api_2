@@ -921,3 +921,12 @@ class ToolRegistry:
                 "success": False,
                 "error": f"Failed to emulate command: {str(e)}"
             }
+
+    def get_available_tools(self):
+        """Get a list of available tools with their documentation.
+        
+        Returns:
+            dict: Dictionary mapping tool names to their documentation
+        """
+        tools = self.list_tools()
+        return {tool['name']: tool for tool in tools}

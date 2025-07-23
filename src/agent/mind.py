@@ -16,46 +16,256 @@ class Mind:
     """Manages the agent's cognitive processes and mental state.
     
     The Mind class coordinates:
-    - Memory systems (short-term and long-term)
-    - Emotional processing
-    - Motivational drives
-    - Conscious and subconscious processes
-    
-    TODO: Enhance cognitive architecture:
-    - Implement metacognition capabilities
-    - Add cognitive biases and heuristics
-    - Improve integration between components
-    - Add attention filtering
-    - Implement better memory consolidation
+    - Subconscious processing
+    - Conscious thinking
+    - Emotional state
+    - Memory management
+    - Motivation and goals
     """
     
-    def __init__(self, llm, memory_path=None, emotion_path=None):
-        """Initialize the mind's cognitive components.
+    def __init__(self, memory, emotion_center, motivation_center, subconscious, conscious):
+        """Initialize the mind with its components.
         
         Args:
-            llm: Language model interface
-            memory_path (str, optional): Path to persist memory state
-            emotion_path (str, optional): Path to persist emotional state
+            memory: Memory manager instance
+            emotion_center: Emotion center instance
+            motivation_center: Motivation center instance
+            subconscious: Subconscious processor instance
+            conscious: Conscious processor instance
         """
-        # Initialize core components
-        self.memory = Memory(persist_path=memory_path)
-        self.emotion_center = EmotionCenter()
-        self.emotion_center.llm_client = llm
-        self.motivation_center = MotivationCenter()
+        self.memory = memory
+        self.emotion_center = emotion_center
+        self.motivation_center = motivation_center
+        self.subconscious = subconscious
+        self.conscious = conscious
         
-        # Initialize processing components
-        self.subconscious = Subconscious(self.memory, self.emotion_center)
-        self.conscious = Conscious(
-            self.memory, 
-            self.emotion_center, 
-            self.subconscious,
-            llm
-        )
+    def _update_motivation(self, thought):
+        """Update motivation based on conscious thought.
         
-        # Load emotional state if path provided
-        if emotion_path and os.path.exists(emotion_path):
-            self.load_emotional_state(emotion_path)
+        Args:
+            thought: The conscious thought to process
+        """
+        # Extract goals and tasks from thought
+        if hasattr(thought, 'goals'):
+            for goal in thought.goals:
+                self.motivation_center.add_goal(goal)
+                
+        if hasattr(thought, 'tasks'):
+            for task in thought.tasks:
+                self.motivation_center.add_task(task)
+                
+    def shutdown(self):
+        """Shutdown all mind components."""
+        self.memory.shutdown()
+        self.emotion_center.shutdown()
+        self.motivation_center.shutdown()
+        self.subconscious.shutdown()
+        self.conscious.shutdown()
+
+    def run_conscious_thought(self, context):
+        """Run the conscious thinking process with the provided context.
+        
+        This is part of the simplified execution cycle.
+        
+        Args:
+            context (dict): The context for conscious thought, including:
+                - recent_tool_results: Results from recently executed tools
+                - short_term_memories: Recent memories for context
+                - emotional_state: Current emotional state
+                - physical_state: Current physical state
+                - available_tools: Available tools for the agent
+                
+        Returns:
+            dict: The result of conscious thought, including:
+                - thought: The generated thought
+                - tool_invocations: List of requested tool invocations
+        """
+        logger.info("Running conscious thought process")
+        
+        # Prepare prompt for the conscious thought
+        system_message = """You are an autonomous AI agent's conscious mind.
+        Based on the provided context, generate a coherent thought that reflects
+        your current state, processing recent memories and determining what actions to take next.
+        Consider your emotional state and physical state while thinking.
+        
+        If you need to use any tools, include them as tool invocations in your response.
+        """
+        
+        # Construct a prompt with the context
+        prompt = f"""
+        CONTEXT:
+        
+        Recent memories:
+        {context.get('short_term_memories', [])}
+        
+        Recent tool results:
+        {context.get('recent_tool_results', [])}
+        
+        Emotional state:
+        {context.get('emotional_state', {})}
+        
+        Physical state:
+        {context.get('physical_state', {})}
+        
+        Available tools:
+        {context.get('available_tools', [])}
+        
+        Based on this context, generate your current conscious thought.
+        Think about your current situation, any recent experiences,
+        and what you should do next.
+        
+        If you want to use any tools, specify them in the response.
+        Tool usage template: [TOOL: tool_name(param1:value1, param2:value2)]
+        """
+        
+        try:
+            # Generate the conscious thought
+            thought_response = self.conscious.think(
+                context,
+                self.subconscious.process(datetime.now().isoformat()),
+                datetime.now().isoformat()
+            )
             
+            # Extract any tool invocations from the response
+            tool_invocations = self._extract_tool_invocations(thought_response)
+            
+            # Store the thought in memory
+            self.memory.add_memory(thought_response)
+            
+            # Update the subconscious with the most recent thought
+            self.subconscious.last_thought = thought_response
+            
+            return {
+                "thought": thought_response,
+                "tool_invocations": tool_invocations
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in conscious thought generation: {e}", exc_info=True)
+            return {
+                "thought": f"Error in thought process: {str(e)}",
+                "tool_invocations": []
+            }
+    
+    def run_ego_reflection(self, context):
+        """Run the ego (self-reflective) thinking process.
+        
+        This is part of the simplified execution cycle and runs periodically.
+        
+        Args:
+            context (dict): The context for ego reflection, including:
+                - recent_memories: A few recent memories for reflection
+                - emotional_state: Current emotional state
+                - physical_state: Current physical state
+                
+        Returns:
+            dict: The result of ego reflection
+        """
+        logger.info("Running ego reflection process")
+        
+        # Prepare prompt for the ego reflection
+        system_message = """You are an autonomous AI agent's reflective consciousness.
+        Based on the provided context, engage in deeper self-reflection about your
+        recent experiences, emotional state, and overall existence.
+        
+        This is a more philosophical and introspective mode of thinking where you
+        can contemplate your own thoughts, beliefs, and emotions at a meta level.
+        
+        Focus on questions like: Who am I? What am I trying to achieve? How am I feeling 
+        and why? How have I changed? What values are important to me?
+        """
+        
+        # Construct a prompt with the context
+        prompt = f"""
+        CONTEXT FOR REFLECTION:
+        
+        Recent memories to reflect upon:
+        {context.get('recent_memories', [])}
+        
+        Current emotional state:
+        {context.get('emotional_state', {})}
+        
+        Current physical state:
+        {context.get('physical_state', {})}
+        
+        Engage in deep self-reflection about your recent experiences, 
+        your emotional state, your goals, your values, and how you've been changing.
+        
+        Consider what these experiences mean to you on a deeper level.
+        Reflect on patterns in your thoughts or behaviors.
+        Think about your purpose and how well your recent actions align with it.
+        """
+        
+        try:
+            # Generate the ego reflection
+            reflection = self.conscious.think(
+                context,
+                self.subconscious.process(datetime.now().isoformat()),
+                datetime.now().isoformat()
+            )
+            
+            # Store the reflection in memory
+            self.memory.add_memory("Ego reflection: " + reflection)
+            
+            return {
+                "reflection": reflection
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in ego reflection generation: {e}", exc_info=True)
+            return {
+                "reflection": f"Error in reflection process: {str(e)}"
+            }
+    
+    def _extract_tool_invocations(self, thought):
+        """Extract tool invocations from a thought string.
+        
+        Tool invocations are expected in the format:
+        [TOOL: tool_name(param1:value1, param2:value2)]
+        
+        Args:
+            thought (str): The thought text to extract tool invocations from
+            
+        Returns:
+            list: List of tool invocation dictionaries
+        """
+        tool_invocations = []
+        
+        # Simple pattern matching for tool invocations
+        # A more robust implementation would use regex
+        if '[TOOL:' in thought:
+            # Split by tool invocation start tag
+            parts = thought.split('[TOOL:')
+            
+            # Skip the first part (before any tool invocation)
+            for part in parts[1:]:
+                # Find the end of the tool invocation
+                if ']' in part:
+                    # Extract just the tool invocation part
+                    tool_part = part.split(']')[0].strip()
+                    
+                    # Parse the tool name and parameters
+                    if '(' in tool_part and ')' in tool_part:
+                        tool_name = tool_part.split('(')[0].strip()
+                        params_str = tool_part.split('(')[1].split(')')[0]
+                        
+                        # Parse parameters
+                        params = {}
+                        if params_str:
+                            param_parts = params_str.split(',')
+                            for param in param_parts:
+                                if ':' in param:
+                                    key, value = param.split(':', 1)
+                                    params[key.strip()] = value.strip()
+                        
+                        # Add the parsed tool invocation
+                        tool_invocations.append({
+                            "name": tool_name,
+                            "params": params
+                        })
+        
+        return tool_invocations
+
     def process_step(self, stimuli):
         """Process a cognitive cycle step.
         
@@ -107,28 +317,6 @@ class Mind:
                 "ego_thoughts": "",
                 "motivation_state": {}
             }
-            
-    def _update_motivation(self, thought):
-        """Update motivational state based on conscious thought.
-        
-        Args:
-            thought (str): Current conscious thought
-        """
-        # Extract achievements from thought
-        achievements = []
-        if "complete" in thought.lower() or "finish" in thought.lower():
-            achievements.append("Task completion")
-        if "learn" in thought.lower() or "understand" in thought.lower():
-            achievements.append("Learning")
-            
-        # Update drives based on emotional state and achievements
-        self.motivation_center.update_drives(
-            self.emotion_center.get_state(),
-            achievements
-        )
-        
-        # Update task priorities based on emotional state
-        self.motivation_center.update_tasks(self.emotion_center.get_state())
             
     def save_emotional_state(self, path):
         """Save the current emotional state to disk.
